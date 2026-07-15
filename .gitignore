@@ -1,0 +1,5 @@
+/target
+cooker.toml
+wallets/
+*.json
+cooker.mainnet-test.toml
