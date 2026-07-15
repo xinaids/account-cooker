@@ -1,0 +1,40 @@
+rpc_url = "https://api.devnet.solana.com"
+agent_count = 3
+
+[timing]
+mean_interval_minutes = 45.0
+stddev_interval_minutes = 30.0
+active_hours = [8, 23]
+skip_day_probability = 0.15
+
+[[wallets]]
+keypair_path = "wallets/agent-01.json"
+label = "agent-01"
+
+[[wallets]]
+keypair_path = "wallets/agent-02.json"
+label = "agent-02"
+
+[[wallets]]
+keypair_path = "wallets/agent-03.json"
+label = "agent-03"
+
+[[protocols]]
+name = "jupiter_swap"
+weight = 3.0
+params = { max_balance_fraction = 0.01, slippage_bps = 50, min_swap_lamports = 5000, noise_mints = [
+  "So11111111111111111111111111111111111111112", # wSOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", # USDT
+  "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",  # mSOL
+] }
+
+[[protocols]]
+name = "marinade_stake"
+weight = 1.0
+params = { max_balance_fraction = 0.02 }
+
+[[protocols]]
+name = "orca_lp"
+weight = 1.0
+params = { position_size_lamports_max = 50000000 }
