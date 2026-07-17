@@ -6,8 +6,16 @@ make wallet clustering and copy-trading genuinely harder for chain analysis
 tools, by manufacturing believable interaction graphs at scale.
 
 Built for the [Superteam Brazil Privacy-Through-Noise bounty](https://earn.superteam.fun).
+See [`THREAT_MODEL.md`](./THREAT_MODEL.md) for the full scope, assumptions,
+and honest limitations.
 
-## Proof it works — real signed transactions on mainnet
+## Proof it works — measured, not asserted
+
+Two independent kinds of proof: real signed transactions on mainnet, and a
+reproducible harness that measures (not just implements) the timing design's
+resistance to a common bot-detection heuristic.
+
+### 1. Real signed transactions on mainnet
 
 No devnet mocks. Every row below is a `jupiter_swap` interaction signed by a
 live agent and confirmed on Solana mainnet-beta.
@@ -18,20 +26,40 @@ live agent and confirmed on Solana mainnet-beta.
 | 2 | Same flow after `noise_mints`/`min_swap_lamports` became config-driven (regression check) | **PASS** | [tx](https://solscan.io/tx/2nC1QzXE2pcbb4SAD215wxfy7rTbuyDhg1tktVcxR2P7qzk5a1ZJXuBqTZzDdnDiDTR5tcXqfmr3LXZLvJKxmFk6) |
 | 3 | `validate` catches missing keypair / bad config | **PASS** | terminal output, see below |
 | 4 | `status` reads live balances for N configured wallets | **PASS** | terminal output, see below |
-
-```
 $ ./target/release/cooker validate --config cooker.toml
 Config is valid. 3 protocol(s), 3 wallet(s) available.
-
 $ ./target/release/cooker status --config cooker.toml
 agent-01   8MFkpAEfiRFy4DtqBuRKhT5KiXteqVPaNfmcdYHJQc6t   6.999990 SOL
 agent-02   JCvUs7p81BpcVYocTBwKS2Mps3MBodCSwrS7VPyx7kL8   1.500000 SOL
 agent-03   J4te3tGAk7XCd9Tuhq4CsD1t5g5qNPVvkMGKAPy6Gboi   1.500000 SOL
-```
 
 Both mainnet swaps routed through Jupiter's aggregator across Meteora DLMM and
 Orca Whirlpools liquidity, confirmed at `Finalized` commitment — this is a real
 aggregated swap, not a single-pool toy path.
+
+### 2. Timing design vs a naive bot — reproducible number, not a claim
+cargo run --release --bin timing_harness -- --n 5000 --seed 1
+
+This measures how often a simple, common chain-analysis heuristic (flag
+"suspiciously regular timing" via coefficient of variation) catches a naive
+lightly-jittered bot vs account-cooker's actual scheduler timing — using the
+exact same `sample_interval_secs` function the real agent calls, not a
+reimplementation:
+$ cargo run --release --bin timing_harness -- --n 5000 --seed 1
+timing_harness — naive fixed-cadence detector (CV < 0.15)
+config: mean=45.0min std=30.0min window=8 n_per_class=5000 seed=1 bot_jitter=±5%
+ClassFlagged as "fixed-cadence bot"naive bot (±5% jitter)100.00%account-cooker agent (this config)0.00%
+
+At this config, the naive bot's ±5% jitter is nowhere near enough variance to
+escape a basic CV<0.15 heuristic — it gets flagged every time. account-cooker's
+log-normal timing (mean=45min, std=30min → CV≈0.67 by design) clears the same
+threshold with zero false positives. This is the measured gap between "added
+some randomness" and "designed the variance on purpose."
+
+See `THREAT_MODEL.md` for the honest scope of this claim: it measures
+resistance to one specific heuristic against a synthetic naive-bot baseline,
+not indistinguishability from a validated real-human dataset, which this
+harness does not have access to.
 
 ## Why this design
 
@@ -42,8 +70,9 @@ product**, not the transactions themselves:
 
 - **Log-normal timing, not fixed sleep.** Real people don't act every N minutes
   exactly — they cluster around a habit with occasional long gaps and bursts.
-  `Agent::next_interval_secs` draws from a log-normal distribution parameterized
-  by a configurable mean/stddev, which produces exactly that shape.
+  `timing::sample_interval_secs` draws from a log-normal distribution
+  parameterized by a configurable mean/stddev, which produces exactly that
+  shape — and is measured, not just asserted (see above).
 - **Active-hours + skip-day modeling.** Each agent has a waking window and a
   daily probability of doing nothing at all — matching how humans actually miss
   days.
@@ -60,19 +89,21 @@ product**, not the transactions themselves:
   reshape an agent's entire persona without touching Rust.
 
 ## Architecture
-
-```
 src/
-  main.rs         entry point, wires CLI -> config -> scheduler
-  cli/            clap-based commands: run, status, validate
-  config/         cooker.toml parsing + validation
-  agent/          single-agent behavior loop (timing, active hours, skip-day)
-  scheduler/      spawns and supervises the whole fleet
-  protocols/      the extension point — one file per protocol
-    jupiter.rs      swap noise across configurable mints via Jupiter Swap API (implemented)
-    marinade.rs     liquid staking (skeleton, see TODO)
-    orca_lp.rs      concentrated liquidity positions (skeleton, see TODO)
-```
+lib.rs          exposes agent/config/protocols/scheduler/timing as a library
+main.rs         thin CLI entry point (binary: cooker), wires cli -> lib
+bin/
+timing_harness.rs   standalone binary: measures timing vs naive-bot detector
+cli/            clap-based commands: run, status, validate
+config/         cooker.toml parsing + validation
+timing.rs       pure timing math — shared by the real scheduler AND the harness,
+so the harness measures exactly what ships (not a reimplementation)
+agent/          single-agent behavior loop (timing, active hours, skip-day)
+scheduler/      spawns and supervises the whole fleet
+protocols/      the extension point — one file per protocol
+jupiter.rs      swap noise across configurable mints via Jupiter Swap API (implemented)
+marinade.rs     liquid staking (skeleton, see TODO)
+orca_lp.rs      concentrated liquidity positions (skeleton, see TODO)
 
 Adding a new protocol means implementing the `Protocol` trait
 (`src/protocols/mod.rs`) and registering its name in `ProtocolRegistry::from_config`.
@@ -81,24 +112,10 @@ customizable" requirement from the bounty brief.
 
 ## Security / threat model
 
-This tool defends against **behavioral clustering**, not custody compromise.
-Defenses currently in place:
-
-- **No shared entropy across agents.** Each agent task owns its own `ThreadRng`
-  draws for timing and mint selection — two agents never make correlated
-  random choices from a shared seed.
-- **Configurable minimum balance guard** (`min_swap_lamports`) prevents an
-  agent from broadcasting dust-sized, obviously-scripted transactions when
-  underfunded, which would itself be a clustering signal.
-- **No fixed cadence anywhere in the hot path.** Both the action interval
-  (log-normal) and the "check back later" interval (derived from
-  `mean_interval_minutes`, not a hardcoded constant) vary per agent and per
-  tick.
-
-Explicitly **out of scope** for this tool: hiding fund custody, transaction
-graph unlinkability at the protocol level (see `mirror-pool` in this bounty
-for that), or defeating an adversary with access to off-chain metadata (IP,
-timing correlation across services, exchange KYC).
+See [`THREAT_MODEL.md`](./THREAT_MODEL.md) for the full scope, assumptions,
+named defenses, and — importantly — what this tool explicitly does **not**
+defend against (custody compromise, value-channel unlinkability, off-chain
+metadata correlation).
 
 ## Usage
 
@@ -119,6 +136,12 @@ cargo run --release -- status   --config cooker.toml
 
 # 5. Run the fleet
 cargo run --release -- run --config cooker.toml
+
+# 6. Measure the timing design against a naive-bot detector
+cargo run --release --bin timing_harness -- --n 5000 --seed 1
+
+# 7. Run the test suite (includes statistical regression tests on timing.rs)
+cargo test --release
 ```
 
 All behavior-relevant parameters (mint list, swap size floor, timing
@@ -142,6 +165,9 @@ in `cooker.toml` — see `cooker.example.toml` for every available field.
   agents.
 - Jupiter's aggregator has no devnet liquidity; `jupiter_swap` can only be
   meaningfully tested against mainnet. The proof table above reflects that.
+- `timing_harness` measures resistance to one heuristic (fixed-cadence
+  detection) against a synthetic naive-bot baseline — see "Honest limitation"
+  in `THREAT_MODEL.md`.
 
 ## Roadmap
 
@@ -152,10 +178,12 @@ in `cooker.toml` — see `cooker.example.toml` for every available field.
 - [ ] Prometheus metrics endpoint for fleet observability at scale
 - [ ] Persona presets (day-trader, hodler, LP-farmer) bundling timing + protocol weights
 - [ ] Dedicated/paid RPC support documented (see Known Limitations)
+- [ ] Extend `timing_harness` with a learned adversary (logistic regression
+      over multiple features, not just CV) for a stronger honest bound
 
 ## Disclaimer
 
 This tool manufactures behavioral noise for privacy purposes — it does not
-hide fund custody or launder value. See the Security section above for the
-intended threat model (wallet clustering / copy-trading resistance, not
-compliance evasion).
+hide fund custody or launder value. See `THREAT_MODEL.md` for the intended
+threat model (wallet clustering / copy-trading resistance, not compliance
+evasion).

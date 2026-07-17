@@ -1,6 +1,5 @@
 use chrono::{Local, Timelike};
 use rand::Rng;
-use rand_distr::{Distribution, LogNormal};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::signature::{read_keypair_file, Keypair, Signer};
 use std::sync::Arc;
@@ -66,27 +65,14 @@ impl Agent {
                 Err(e) => tracing::warn!("[{}] action skipped/failed: {e}", self.label),
             }
 
-            let sleep_secs = self.next_interval_secs();
+            let sleep_secs = crate::timing::sample_interval_secs(
+                self.timing.mean_interval_minutes,
+                self.timing.stddev_interval_minutes,
+                &mut rand::thread_rng(),
+            );
             tracing::debug!("[{}] sleeping {}s until next action", self.label, sleep_secs);
             tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
         }
-    }
-
-    /// Draws the next wait time from a log-normal distribution: mostly clusters
-    /// around the mean but occasionally produces long gaps or quick bursts —
-    /// exactly the irregularity that separates humans from cron jobs.
-    fn next_interval_secs(&self) -> u64 {
-        let mean_secs = (self.timing.mean_interval_minutes * 60.0).max(1.0);
-        let std_secs = (self.timing.stddev_interval_minutes * 60.0).max(1.0);
-
-        // Convert desired arithmetic mean/std into log-normal mu/sigma params.
-        let variance = std_secs.powi(2);
-        let mu = (mean_secs.powi(2) / (mean_secs.powi(2) + variance).sqrt()).ln();
-        let sigma = ((variance / mean_secs.powi(2)) + 1.0).ln().sqrt();
-
-        let dist = LogNormal::new(mu, sigma).unwrap_or(LogNormal::new(mean_secs.ln(), 0.5).unwrap());
-        let draw = dist.sample(&mut rand::thread_rng());
-        draw.clamp(30.0, 60.0 * 60.0 * 12.0) as u64
     }
 }
 

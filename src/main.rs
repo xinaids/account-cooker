@@ -1,9 +1,6 @@
-mod agent;
-mod scheduler;
-mod protocols;
-mod config;
 mod cli;
 
+use account_cooker::{config, scheduler};
 use clap::Parser;
 use cli::{Cli, Commands};
 use tracing_subscriber::EnvFilter;
