@@ -26,6 +26,7 @@ live agent and confirmed on Solana mainnet-beta.
 | 2 | Same flow after `noise_mints`/`min_swap_lamports` became config-driven (regression check) | **PASS** | [tx](https://solscan.io/tx/2nC1QzXE2pcbb4SAD215wxfy7rTbuyDhg1tktVcxR2P7qzk5a1ZJXuBqTZzDdnDiDTR5tcXqfmr3LXZLvJKxmFk6) |
 | 3 | `validate` catches missing keypair / bad config | **PASS** | terminal output, see below |
 | 4 | `status` reads live balances for N configured wallets | **PASS** | terminal output, see below |
+| 5 | Marinade `deposit` — manually built instruction (real PDAs derived, no Anchor client), simulated then sent | **PASS** | [tx](https://solscan.io/tx/3UALUZB3ZUe8qYZa3DwYrHd6qa9QRhGRbFi8u46RUDTXubxbpZYTn8YQ39y2SiDWUdTNEhRbMCGqTkajFqSzxrZN) |
 $ ./target/release/cooker validate --config cooker.toml
 Config is valid. 3 protocol(s), 3 wallet(s) available.
 $ ./target/release/cooker status --config cooker.toml
@@ -36,6 +37,19 @@ agent-03   J4te3tGAk7XCd9Tuhq4CsD1t5g5qNPVvkMGKAPy6Gboi   1.500000 SOL
 Both mainnet swaps routed through Jupiter's aggregator across Meteora DLMM and
 Orca Whirlpools liquidity, confirmed at `Finalized` commitment — this is a real
 aggregated swap, not a single-pool toy path.
+
+The Marinade deposit (row 5) is not built with the Anchor-generated SDK — the
+available crates (`marinade`, `marinade-cpi`) pin an older `solana-program`
+incompatible with this project's `solana-sdk = "2.1"`. Instead the `deposit`
+instruction is built by hand: PDAs (`reserve_pda`, `liq_pool_sol_leg_pda`,
+`liq_pool_msol_leg_authority`, `msol_mint_authority`) are derived via
+`Pubkey::find_program_address` using the exact seed constants from
+[`marinade-finance/liquid-staking-program`](https://github.com/marinade-finance/liquid-staking-program)
+(`state/mod.rs`, `state/liq_pool.rs`), verified against the live on-chain
+`State` account rather than trusted from memory, and the caller's mSOL
+associated token account is created idempotently before minting. The
+transaction is simulated (`simulateTransaction`) before ever being sent for
+real — see `src/protocols/marinade.rs` and `src/bin/marinade_test.rs`.
 
 ### 2. Timing design vs a naive bot — reproducible number, not a claim
 cargo run --release --bin timing_harness -- --n 5000 --seed 1
@@ -84,9 +98,10 @@ product**, not the transactions themselves:
   RPC client and the protocol registry, which is what lets this scale to
   thousands of concurrent agents without coordination overhead.
 - **Nothing behavior-relevant is hardcoded.** Mint selection (`noise_mints`),
-  minimum swap size (`min_swap_lamports`), timing distribution, active hours,
-  and skip-day probability are all read from `cooker.toml` — an operator can
-  reshape an agent's entire persona without touching Rust.
+  minimum swap size (`min_swap_lamports`), minimum stake size
+  (`min_stake_lamports`), timing distribution, active hours, and skip-day
+  probability are all read from `cooker.toml` — an operator can reshape an
+  agent's entire persona without touching Rust.
 
 ## Architecture
 src/
@@ -102,7 +117,7 @@ agent/          single-agent behavior loop (timing, active hours, skip-day)
 scheduler/      spawns and supervises the whole fleet
 protocols/      the extension point — one file per protocol
 jupiter.rs      swap noise across configurable mints via Jupiter Swap API (implemented)
-marinade.rs     liquid staking (skeleton, see TODO)
+marinade.rs     liquid staking — deposit SOL, mint mSOL (implemented)
 orca_lp.rs      concentrated liquidity positions (skeleton, see TODO)
 
 Adding a new protocol means implementing the `Protocol` trait
@@ -153,7 +168,7 @@ in `cooker.toml` — see `cooker.example.toml` for every available field.
 | Protocol        | Status                          |
 |-----------------|----------------------------------|
 | `jupiter_swap`  | **Implemented** — real quote+swap via Jupiter Swap API, validated with 2 signed mainnet transactions (see proof table above) |
-| `marinade_stake`| Skeleton — instruction building TODO |
+| `marinade_stake`| **Implemented** — hand-built `deposit` instruction against Marinade State with derived PDAs, validated with 1 signed mainnet transaction (see proof table above) |
 | `orca_lp`       | Skeleton — instruction building TODO |
 
 ## Known limitations
@@ -171,7 +186,7 @@ in `cooker.toml` — see `cooker.example.toml` for every available field.
 
 ## Roadmap
 
-- [ ] Complete Marinade and Orca Whirlpools integrations
+- [ ] Complete Orca Whirlpools integration (Marinade is done — see Status)
 - [ ] Fund splitting / periodic consolidation across agent wallets
 - [ ] Dust-level interaction mode (sub-cent amounts, higher frequency)
 - [ ] Bridge interactions (Wormhole) for cross-chain noise

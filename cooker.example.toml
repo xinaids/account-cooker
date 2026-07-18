@@ -32,7 +32,7 @@ params = { max_balance_fraction = 0.01, slippage_bps = 50, min_swap_lamports = 5
 [[protocols]]
 name = "marinade_stake"
 weight = 1.0
-params = { max_balance_fraction = 0.02 }
+params = { max_balance_fraction = 0.02, min_stake_lamports = 1000000 }
 
 [[protocols]]
 name = "orca_lp"

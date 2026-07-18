@@ -42,7 +42,7 @@ It does **not** defend against:
 | **Log-normal timing, not fixed interval** | `sample_interval_secs` draws from a log-normal distribution parameterized by configurable mean/stddev — mostly clusters near the mean but produces occasional long gaps and short bursts | `src/timing.rs` |
 | **Active-hours + skip-day modeling** | Each agent has a waking window and a per-day probability of doing nothing — matching how real humans miss days entirely | `src/agent/mod.rs` |
 | **Weighted, configurable protocol rotation** | Agents rotate across swaps/staking/LPing per configured weights rather than hammering one protocol | `src/protocols/mod.rs` |
-| **Configurable minimum balance guard** | `min_swap_lamports` stops an agent from broadcasting dust-sized, obviously-scripted transactions when underfunded — itself a clustering tell | `src/protocols/jupiter.rs` |
+| **Configurable minimum balance guard** | `min_swap_lamports` / `min_stake_lamports` stop an agent from broadcasting dust-sized, obviously-scripted transactions when underfunded — itself a clustering tell | `src/protocols/jupiter.rs`, `src/protocols/marinade.rs` |
 | **No hardcoded behavior parameters** | Mint selection, swap-size floor, timing distribution, active hours, skip-day probability, per-protocol weights all live in `cooker.toml` | `cooker.example.toml` |
 
 ## Measured, not asserted
