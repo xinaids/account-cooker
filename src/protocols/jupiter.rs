@@ -37,7 +37,7 @@ struct SwapResponse {
 /// Fallback used only if `noise_mints` is absent from cooker.toml — well-known,
 /// high-liquidity mints. Operators are expected to override this list in config.
 const DEFAULT_NOISE_MINTS: &[&str] = &[
-    "So11111111111111111111111111111111111111112", // wSOL
+    "So11111111111111111111111111111111111111112",  // wSOL
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
     "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",  // mSOL
@@ -56,7 +56,11 @@ impl JupiterSwap {
         let noise_mints: Vec<String> = params
             .get("noise_mints")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .filter(|v: &Vec<String>| !v.is_empty())
             .unwrap_or_else(|| DEFAULT_NOISE_MINTS.iter().map(|s| s.to_string()).collect());
         if noise_mints.len() < 2 {
@@ -66,14 +70,25 @@ impl JupiterSwap {
             .get("min_swap_lamports")
             .and_then(|v| v.as_integer())
             .unwrap_or(5_000) as u64;
-        Ok(Self { max_balance_fraction, slippage_bps, noise_mints, min_swap_lamports })
+        Ok(Self {
+            max_balance_fraction,
+            slippage_bps,
+            noise_mints,
+            min_swap_lamports,
+        })
     }
 
     fn pick_pair(&self) -> (&str, &str) {
         let mut rng = rand::thread_rng();
-        let input = self.noise_mints.choose(&mut rng).expect("validated non-empty in from_params");
+        let input = self
+            .noise_mints
+            .choose(&mut rng)
+            .expect("validated non-empty in from_params");
         let output = loop {
-            let candidate = self.noise_mints.choose(&mut rng).expect("validated non-empty in from_params");
+            let candidate = self
+                .noise_mints
+                .choose(&mut rng)
+                .expect("validated non-empty in from_params");
             if candidate != input {
                 break candidate;
             }
@@ -88,11 +103,7 @@ impl Protocol for JupiterSwap {
         "jupiter_swap"
     }
 
-    async fn execute(
-        &self,
-        rpc: &RpcClient,
-        wallet: &Keypair,
-    ) -> anyhow::Result<Signature> {
+    async fn execute(&self, rpc: &RpcClient, wallet: &Keypair) -> anyhow::Result<Signature> {
         let balance_lamports = rpc.get_balance(&wallet.pubkey()).await?;
         // Keep a safety reserve for fees/rent so the agent never drains itself.
         let usable = (balance_lamports as f64 * self.max_balance_fraction) as u64;
@@ -119,10 +130,16 @@ impl Protocol for JupiterSwap {
             .json()
             .await?;
 
-        let out_amount = quote.get("outAmount").and_then(|v| v.as_str()).unwrap_or("?");
+        let out_amount = quote
+            .get("outAmount")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
         tracing::debug!(
             "quote {} -> {} amount_in={} amount_out={}",
-            input_mint, output_mint, amount, out_amount
+            input_mint,
+            output_mint,
+            amount,
+            out_amount
         );
 
         let swap_body = serde_json::json!({

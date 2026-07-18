@@ -43,9 +43,15 @@ pub struct ProtocolConfig {
     pub params: toml::Table,
 }
 
-fn default_agent_count() -> usize { 5 }
-fn default_skip_day_prob() -> f64 { 0.15 }
-fn default_weight() -> f64 { 1.0 }
+fn default_agent_count() -> usize {
+    5
+}
+fn default_skip_day_prob() -> f64 {
+    0.15
+}
+fn default_weight() -> f64 {
+    1.0
+}
 
 impl CookerConfig {
     pub fn load(path: &str) -> anyhow::Result<Self> {

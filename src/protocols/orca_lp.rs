@@ -23,7 +23,9 @@ impl OrcaLp {
             .get("position_size_lamports_max")
             .and_then(|v| v.as_integer())
             .unwrap_or(50_000_000) as u64;
-        Ok(Self { position_size_lamports_max })
+        Ok(Self {
+            position_size_lamports_max,
+        })
     }
 }
 
@@ -33,11 +35,7 @@ impl Protocol for OrcaLp {
         "orca_lp"
     }
 
-    async fn execute(
-        &self,
-        _rpc: &RpcClient,
-        _wallet: &Keypair,
-    ) -> anyhow::Result<Signature> {
+    async fn execute(&self, _rpc: &RpcClient, _wallet: &Keypair) -> anyhow::Result<Signature> {
         anyhow::bail!(
             "orca_lp not yet implemented (max_position={}) — see TODO in protocols/orca_lp.rs",
             self.position_size_lamports_max

@@ -16,23 +16,24 @@ pub struct Agent {
 
 impl Agent {
     pub fn from_config(wallet_cfg: &WalletConfig, timing: TimingConfig) -> anyhow::Result<Self> {
-        let wallet = read_keypair_file(&wallet_cfg.keypair_path)
-            .map_err(|e| anyhow::anyhow!("failed to load keypair {}: {e}", wallet_cfg.keypair_path))?;
+        let wallet = read_keypair_file(&wallet_cfg.keypair_path).map_err(|e| {
+            anyhow::anyhow!("failed to load keypair {}: {e}", wallet_cfg.keypair_path)
+        })?;
         let label = wallet_cfg
             .label
             .clone()
             .unwrap_or_else(|| wallet.pubkey().to_string()[..8].to_string());
-        Ok(Self { label, wallet, timing })
+        Ok(Self {
+            label,
+            wallet,
+            timing,
+        })
     }
 
     /// Runs this agent forever: sleeps a human-like, non-deterministic interval,
     /// checks whether it's inside its active hours and hasn't decided to skip
     /// the day, then fires one weighted-random protocol interaction.
-    pub async fn run_forever(
-        self,
-        rpc: Arc<RpcClient>,
-        registry: Arc<ProtocolRegistry>,
-    ) {
+    pub async fn run_forever(self, rpc: Arc<RpcClient>, registry: Arc<ProtocolRegistry>) {
         let mut skip_today = rand::thread_rng().gen_bool(self.timing.skip_day_probability);
         let mut current_day = Local::now().date_naive();
 
@@ -54,8 +55,8 @@ impl Agent {
                 // Check back at a fraction of the mean interval rather than a
                 // hardcoded constant, so faster-cadence configs (e.g. dust-mode
                 // agents) don't wait an unrelated fixed period.
-                let recheck_secs = (self.timing.mean_interval_minutes * 60.0 / 4.0)
-                    .clamp(30.0, 600.0) as u64;
+                let recheck_secs =
+                    (self.timing.mean_interval_minutes * 60.0 / 4.0).clamp(30.0, 600.0) as u64;
                 tokio::time::sleep(Duration::from_secs(recheck_secs)).await;
                 continue;
             }
@@ -70,7 +71,11 @@ impl Agent {
                 self.timing.stddev_interval_minutes,
                 &mut rand::thread_rng(),
             );
-            tracing::debug!("[{}] sleeping {}s until next action", self.label, sleep_secs);
+            tracing::debug!(
+                "[{}] sleeping {}s until next action",
+                self.label,
+                sleep_secs
+            );
             tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
         }
     }

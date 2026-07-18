@@ -64,8 +64,7 @@ mod tests {
             .map(|_| sample_interval_secs(mean_minutes, std_minutes, &mut rng) as f64)
             .collect();
         let mean: f64 = samples.iter().sum::<f64>() / n as f64;
-        let variance: f64 =
-            samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
+        let variance: f64 = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
         let std = variance.sqrt();
 
         let target_mean = mean_minutes * 60.0;
@@ -89,7 +88,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         for _ in 0..5_000 {
             let s = sample_interval_secs(45.0, 30.0, &mut rng);
-            assert!(s >= 30 && s <= 60 * 60 * 12);
+            assert!((30..=60 * 60 * 12).contains(&s));
         }
     }
 

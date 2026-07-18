@@ -14,10 +14,14 @@ pub async fn run_fleet(cfg: CookerConfig, agent_override: Option<usize>) -> anyh
     let rpc = Arc::new(RpcClient::new(cfg.rpc_url.clone()));
     let registry = Arc::new(ProtocolRegistry::from_config(&cfg.protocols)?);
 
-    let wallet_count = agent_override.unwrap_or(cfg.agent_count).min(cfg.wallets.len());
+    let wallet_count = agent_override
+        .unwrap_or(cfg.agent_count)
+        .min(cfg.wallets.len());
     tracing::info!(
         "starting fleet: {} agent(s), {} protocol(s), rpc={}",
-        wallet_count, registry.len(), cfg.rpc_url
+        wallet_count,
+        registry.len(),
+        cfg.rpc_url
     );
 
     let mut handles = Vec::with_capacity(wallet_count);
@@ -50,7 +54,9 @@ pub async fn print_status(cfg: &CookerConfig) -> anyhow::Result<()> {
     for w in &cfg.wallets {
         let kp = solana_sdk::signature::read_keypair_file(&w.keypair_path)
             .map_err(|e| anyhow::anyhow!("bad keypair {}: {e}", w.keypair_path))?;
-        let balance = rpc.get_balance(&solana_sdk::signer::Signer::pubkey(&kp)).await?;
+        let balance = rpc
+            .get_balance(&solana_sdk::signer::Signer::pubkey(&kp))
+            .await?;
         println!(
             "{:<20} {:<44} {:>12.6} SOL",
             w.label.clone().unwrap_or_default(),

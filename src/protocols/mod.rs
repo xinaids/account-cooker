@@ -18,11 +18,7 @@ pub trait Protocol: Send + Sync {
     fn name(&self) -> &str;
 
     /// Execute one interaction for the given wallet. Returns the tx signature on success.
-    async fn execute(
-        &self,
-        rpc: &RpcClient,
-        wallet: &Keypair,
-    ) -> anyhow::Result<Signature>;
+    async fn execute(&self, rpc: &RpcClient, wallet: &Keypair) -> anyhow::Result<Signature>;
 }
 
 pub struct ProtocolRegistry {
@@ -55,10 +51,18 @@ impl ProtocolRegistry {
             roll -= w;
         }
         // Fallback (floating point edge case)
-        self.entries.choose(&mut rand::thread_rng()).unwrap().1.as_ref()
+        self.entries
+            .choose(&mut rand::thread_rng())
+            .unwrap()
+            .1
+            .as_ref()
     }
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }

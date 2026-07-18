@@ -15,7 +15,9 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 #[derive(Parser)]
-#[command(about = "Measures how detectable account-cooker's timing is vs a naive fixed-cadence bot")]
+#[command(
+    about = "Measures how detectable account-cooker's timing is vs a naive fixed-cadence bot"
+)]
 struct Args {
     /// Simulated wallets per class (naive bot vs our agent).
     #[arg(long, default_value_t = 5000)]
@@ -39,7 +41,12 @@ struct Args {
     threshold: f64,
 }
 
-fn naive_bot_window(rng: &mut impl Rng, window: usize, mean_minutes: f64, jitter_frac: f64) -> Vec<f64> {
+fn naive_bot_window(
+    rng: &mut impl Rng,
+    window: usize,
+    mean_minutes: f64,
+    jitter_frac: f64,
+) -> Vec<f64> {
     let mean_secs = mean_minutes * 60.0;
     (0..window)
         .map(|_| {
@@ -49,7 +56,12 @@ fn naive_bot_window(rng: &mut impl Rng, window: usize, mean_minutes: f64, jitter
         .collect()
 }
 
-fn agent_window(rng: &mut impl Rng, window: usize, mean_minutes: f64, std_minutes: f64) -> Vec<f64> {
+fn agent_window(
+    rng: &mut impl Rng,
+    window: usize,
+    mean_minutes: f64,
+    std_minutes: f64,
+) -> Vec<f64> {
     (0..window)
         .map(|_| sample_interval_secs(mean_minutes, std_minutes, rng) as f64)
         .collect()
@@ -87,7 +99,10 @@ fn main() {
     let bot_detection_rate = bot_flagged as f64 / args.n as f64;
     let agent_false_flag_rate = agent_flagged as f64 / args.n as f64;
 
-    println!("timing_harness — naive fixed-cadence detector (CV < {:.2})", args.threshold);
+    println!(
+        "timing_harness — naive fixed-cadence detector (CV < {:.2})",
+        args.threshold
+    );
     println!(
         "config: mean={:.1}min std={:.1}min window={} n_per_class={} seed={} bot_jitter=±{:.0}%",
         args.mean_minutes,
