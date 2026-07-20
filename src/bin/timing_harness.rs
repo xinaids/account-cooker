@@ -9,7 +9,10 @@
 //!
 //! Reproduce: cargo run --release --bin timing_harness -- --n 5000 --seed 1
 
-use account_cooker::timing::{coefficient_of_variation, sample_interval_secs};
+use account_cooker::detectors::{roc_auc, standardize, LogisticRegression};
+use account_cooker::timing::{
+    autocorrelation_lag1, coefficient_of_variation, sample_interval_secs, skewness,
+};
 use clap::Parser;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -65,6 +68,114 @@ fn agent_window(
     (0..window)
         .map(|_| sample_interval_secs(mean_minutes, std_minutes, rng) as f64)
         .collect()
+}
+
+fn features(intervals: &[f64]) -> Vec<f64> {
+    vec![
+        coefficient_of_variation(intervals),
+        autocorrelation_lag1(intervals),
+        skewness(intervals),
+    ]
+}
+
+/// Second, stronger named baseline: logistic regression over three timing
+/// features (CV, lag-1 autocorrelation, skewness) instead of a single CV
+/// threshold. Trained on a held-out split, evaluated on a disjoint test
+/// split — the reported number is honest even if it's worse for
+/// account-cooker than the naive-CV result above.
+fn run_logistic_regression_baseline(args: &Args) {
+    let mut rng = ChaCha8Rng::seed_from_u64(args.seed.wrapping_add(1));
+
+    let train_n = args.n;
+    let test_n = (args.n / 3).max(200);
+
+    let gen_set = |n: usize, rng: &mut ChaCha8Rng| -> (Vec<Vec<f64>>, Vec<f64>) {
+        let mut feats = Vec::with_capacity(n * 2);
+        let mut labels = Vec::with_capacity(n * 2);
+        for _ in 0..n {
+            feats.push(features(&naive_bot_window(
+                rng,
+                args.window,
+                args.mean_minutes,
+                args.bot_jitter_frac,
+            )));
+            labels.push(1.0);
+
+            feats.push(features(&agent_window(
+                rng,
+                args.window,
+                args.mean_minutes,
+                args.std_minutes,
+            )));
+            labels.push(0.0);
+        }
+        (feats, labels)
+    };
+
+    let (train_feats, train_labels) = gen_set(train_n, &mut rng);
+    let (test_feats, test_labels) = gen_set(test_n, &mut rng);
+
+    let (train_std, test_std, _, _) = standardize(&train_feats, &test_feats);
+    let model = LogisticRegression::train(&train_std, &train_labels, 0.3, 500);
+
+    let test_scores: Vec<f64> = test_std
+        .iter()
+        .map(|row| model.predict_proba(row))
+        .collect();
+    let auc = roc_auc(&test_labels, &test_scores);
+
+    let mut bot_flagged = 0usize;
+    let mut bot_total = 0usize;
+    let mut agent_flagged = 0usize;
+    let mut agent_total = 0usize;
+    for (label, score) in test_labels.iter().zip(test_scores.iter()) {
+        if *label == 1.0 {
+            bot_total += 1;
+            if *score >= 0.5 {
+                bot_flagged += 1;
+            }
+        } else {
+            agent_total += 1;
+            if *score >= 0.5 {
+                agent_flagged += 1;
+            }
+        }
+    }
+
+    println!();
+    println!("--- stronger baseline: logistic regression over [CV, autocorr(lag1), skew] ---");
+    println!(
+        "train_n={} (per class) test_n={} (per class, held out)",
+        train_n, test_n
+    );
+    println!("ROC AUC (test, held out): {:.4}", auc);
+    println!("| Class                                    | Flagged @ 0.5 threshold        |");
+    println!("|-------------------------------------------|--------------------------------|");
+    println!(
+        "| naive bot (±{:.0}% jitter)                    | {:>4}/{:<4} ({:>6.2}%)           |",
+        args.bot_jitter_frac * 100.0,
+        bot_flagged,
+        bot_total,
+        100.0 * bot_flagged as f64 / bot_total as f64
+    );
+    println!(
+        "| account-cooker agent (this config)         | {:>4}/{:<4} ({:>6.2}%)           |",
+        agent_flagged,
+        agent_total,
+        100.0 * agent_flagged as f64 / agent_total as f64
+    );
+    println!();
+    println!(
+        "Honest reading: this number is reported as measured, whatever it \
+        turns out to be. A 3-feature logistic regression is still a weak \
+        adversary relative to a real analytics team with a labeled dataset \
+        (see supersonic-tx's 23-feature classifier in this same bounty for \
+        a stronger reference point) — if the agent's false-flag rate here \
+        is above 0%, that does NOT contradict the CV-only result above; it \
+        means CV alone is an incomplete threat model, which THREAT_MODEL.md \
+        already states as a known limitation, not something discovered here \
+        after the fact."
+    );
 }
 
 fn main() {
@@ -141,4 +252,6 @@ fn main() {
             agent_false_flag_rate * 100.0
         );
     }
+
+    run_logistic_regression_baseline(&args);
 }

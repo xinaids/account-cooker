@@ -2,11 +2,17 @@ use chrono::{Local, Timelike};
 use rand::Rng;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::signature::{read_keypair_file, Keypair, Signer};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::{TimingConfig, WalletConfig};
 use crate::protocols::ProtocolRegistry;
+use crate::state::Checkpoint;
+
+/// Directory where per-agent crash-recovery checkpoints are written. Kept
+/// out of git (see `.gitignore`) since it's local runtime state, not config.
+const STATE_DIR: &str = ".cooker_state";
 
 pub struct Agent {
     pub label: String,
@@ -36,6 +42,34 @@ impl Agent {
     pub async fn run_forever(self, rpc: Arc<RpcClient>, registry: Arc<ProtocolRegistry>) {
         let mut skip_today = rand::thread_rng().gen_bool(self.timing.skip_day_probability);
         let mut current_day = Local::now().date_naive();
+        let state_dir = PathBuf::from(STATE_DIR);
+        let mut action_count = 0u64;
+
+        // Resume from a crash instead of acting immediately: if a checkpoint
+        // exists and it isn't due yet, wait out the remainder rather than
+        // firing an action right after restart (which would be a burst tell)
+        // or restarting a full fresh interval (wasteful but not incorrect).
+        if let Some(cp) = Checkpoint::load(&state_dir, &self.label) {
+            action_count = cp.action_count;
+            let now_unix = chrono::Utc::now().timestamp();
+            let remaining = cp.next_action_due_unix - now_unix;
+            if remaining > 0 {
+                tracing::info!(
+                    "[{}] resuming from checkpoint (action_count={}), waiting {}s remaining",
+                    self.label,
+                    action_count,
+                    remaining
+                );
+                tokio::time::sleep(Duration::from_secs(remaining as u64)).await;
+            } else {
+                tracing::info!(
+                    "[{}] resuming from checkpoint (action_count={}), overdue by {}s, acting now",
+                    self.label,
+                    action_count,
+                    -remaining
+                );
+            }
+        }
 
         loop {
             let now = Local::now();
@@ -61,8 +95,13 @@ impl Agent {
                 continue;
             }
 
+            let mut last_sig = None;
             match registry_action(&self, &rpc, &registry).await {
-                Ok(sig) => tracing::info!("[{}] action ok, sig={}", self.label, sig),
+                Ok(sig) => {
+                    tracing::info!("[{}] action ok, sig={}", self.label, sig);
+                    last_sig = Some(sig.to_string());
+                    action_count += 1;
+                }
                 Err(e) => tracing::warn!("[{}] action skipped/failed: {e}", self.label),
             }
 
@@ -71,6 +110,20 @@ impl Agent {
                 self.timing.stddev_interval_minutes,
                 &mut rand::thread_rng(),
             );
+
+            // Checkpoint before the long sleep, not after: this is the
+            // window where a crash needs to be recoverable. On restart the
+            // resume logic above reads this same file.
+            let cp = Checkpoint {
+                last_action_unix: chrono::Utc::now().timestamp(),
+                last_sig,
+                next_action_due_unix: chrono::Utc::now().timestamp() + sleep_secs as i64,
+                action_count,
+            };
+            if let Err(e) = cp.save(&state_dir, &self.label) {
+                tracing::warn!("[{}] failed to write recovery checkpoint: {e}", self.label);
+            }
+
             tracing::debug!(
                 "[{}] sleeping {}s until next action",
                 self.label,

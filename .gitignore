@@ -3,3 +3,4 @@ cooker.toml
 wallets/
 *.json
 cooker.mainnet-test.toml
+.cooker_state/

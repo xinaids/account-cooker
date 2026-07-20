@@ -44,6 +44,48 @@ pub fn coefficient_of_variation(intervals: &[f64]) -> f64 {
     variance.sqrt() / mean
 }
 
+/// Lag-1 autocorrelation of a slice of intervals. A naive bot with
+/// independent jitter around a fixed mean has autocorrelation near 0; some
+/// detectors use this as a second signal alongside CV since CV alone is a
+/// single, well-known heuristic that's easy to defeat by construction
+/// without actually being harder to distinguish on other axes.
+pub fn autocorrelation_lag1(intervals: &[f64]) -> f64 {
+    let n = intervals.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mean: f64 = intervals.iter().sum::<f64>() / n as f64;
+    let mut num = 0.0;
+    for i in 0..n - 1 {
+        num += (intervals[i] - mean) * (intervals[i + 1] - mean);
+    }
+    let den: f64 = intervals.iter().map(|x| (x - mean).powi(2)).sum();
+    if den == 0.0 {
+        0.0
+    } else {
+        num / den
+    }
+}
+
+/// Sample skewness of a slice of intervals. Log-normal timing is right-
+/// skewed by construction (occasional long gaps); a fixed-mean-plus-jitter
+/// bot built from a symmetric distribution is not. This is a third,
+/// independent feature a learned classifier can use beyond CV.
+pub fn skewness(intervals: &[f64]) -> f64 {
+    let n = intervals.len() as f64;
+    if n < 2.0 {
+        return 0.0;
+    }
+    let mean: f64 = intervals.iter().sum::<f64>() / n;
+    let variance: f64 = intervals.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+    let std = variance.sqrt();
+    if std == 0.0 {
+        return 0.0;
+    }
+    let m3: f64 = intervals.iter().map(|x| (x - mean).powi(3)).sum::<f64>() / n;
+    m3 / std.powi(3)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +138,17 @@ mod tests {
     fn coefficient_of_variation_zero_for_constant_series() {
         let constant = vec![100.0; 10];
         assert_eq!(coefficient_of_variation(&constant), 0.0);
+    }
+
+    #[test]
+    fn autocorrelation_zero_for_constant_series() {
+        let constant = vec![100.0; 10];
+        assert_eq!(autocorrelation_lag1(&constant), 0.0);
+    }
+
+    #[test]
+    fn skewness_zero_for_symmetric_series() {
+        let symmetric = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        assert!(skewness(&symmetric).abs() < 1e-9);
     }
 }
