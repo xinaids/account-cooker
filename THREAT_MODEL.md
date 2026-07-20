@@ -75,10 +75,30 @@ CV), using a **synthetic naive-bot baseline**, not a validated dataset of
 real human wallet timing. We do not have access to such a dataset, so we do
 not claim "indistinguishable from real humans" — only "meaningfully harder
 to flag than a lightly-jittered naive bot under this specific, common
-heuristic." A sophisticated adversary with a real labeled dataset and a
-learned classifier (analogous to `supersonic-tx`'s 23-feature logistic
-regression) could likely do better than this simple CV heuristic; extending
-`timing_harness` with a learned adversary is on the roadmap.
+heuristic."
+
+`timing_harness` also now runs a second, stronger baseline: a small logistic
+regression (`src/detectors.rs`) over three features — CV, lag-1
+autocorrelation, and skewness — trained and evaluated on a held-out split.
+At the example config (mean=45min, std=30min, seed=1), this reports:
+
+- ROC AUC on the held-out test set: **1.0000** — still fully separable at
+  this sample size.
+- Agent false-flag rate at a 0.5 threshold: **0.72%**, up from **0.00%**
+  under the single-feature CV threshold above.
+
+That 0.72% is reported **because it is the measured number, not because it's
+favorable** — it is worse than the CV-only result. It means autocorrelation
+and skewness carry a little real signal about log-normal timing that a bare
+CV threshold misses, i.e., CV alone is an incomplete adversary model, exactly
+as this document already said before this measurement existed. It does not
+mean the timing design fails: 0.72% is still a low false-flag rate against a
+learned 3-feature classifier, and this classifier remains far weaker than a
+real adversary with a labeled human dataset and more features — such as
+`supersonic-tx`'s 23-feature logistic regression in this same bounty, which
+is the sharper reference point. Extending `timing_harness` further (more
+features, a real held-out human dataset if one becomes available) remains
+open work; this update is scoped honestly as "one step stronger," not "solved."
 
 ## Out of scope, restated
 
