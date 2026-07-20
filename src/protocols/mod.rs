@@ -1,6 +1,7 @@
 pub mod jupiter;
 pub mod marinade;
 pub mod orca_lp;
+pub mod supersonic_cast;
 
 use async_trait::async_trait;
 use rand::seq::SliceRandom;
@@ -33,6 +34,9 @@ impl ProtocolRegistry {
                 "jupiter_swap" => Box::new(jupiter::JupiterSwap::from_params(&c.params)?),
                 "marinade_stake" => Box::new(marinade::MarinadeStake::from_params(&c.params)?),
                 "orca_lp" => Box::new(orca_lp::OrcaLp::from_params(&c.params)?),
+                "supersonic_cast" => {
+                    Box::new(supersonic_cast::SupersonicCast::from_params(&c.params)?)
+                }
                 other => anyhow::bail!("unknown protocol in config: {other}"),
             };
             entries.push((c.weight.max(0.0001), proto));

@@ -51,6 +51,39 @@ associated token account is created idempotently before minting. The
 transaction is simulated (`simulateTransaction`) before ever being sent for
 real — see `src/protocols/marinade.rs` and `src/bin/marinade_test.rs`.
 
+### 1b. Composability — a real bundle cast through supersonic-tx (devnet)
+
+The edital asks for composability: "so other tools (including account-cooker)
+can cast through it." `src/protocols/supersonic_cast.rs` is a new `Protocol`
+implementation — same trait, same config-driven pattern as `jupiter.rs` and
+`marinade.rs` above — that casts an agent's noise transfers as
+intent-ambiguous bundles through
+[`supersonic-tx`](https://github.com/solanabr/supersonic-tx) (PR #1 by
+Jmkoygg, `feat/intent-ambiguous-router`), whose router program is deployed and
+live on devnet at `BCrR3JKi5EWhC5DuKYzV4EX7ogawoWaoKkhSqZYeYabn`. It depends on
+that PR's `supersonic-sdk` as an MIT-licensed git dependency and touches only
+its public API (`plan_bundle` + `build_instruction`) — **not a reimplementation
+of the router**, see [`COMPOSABILITY.md`](https://github.com/solanabr/supersonic-tx)
+in the sibling `supersonic-tx-compose` repo for the full writeup and a second,
+standalone proof transaction outside account-cooker entirely.
+
+| # | What was tested | Result | Proof |
+|---|---|---|---|
+| 6 | `SupersonicCast::execute` — the real `Protocol` trait code path (`src/bin/supersonic_cast_test.rs`) — plans an 8-leg bundle and sends it against the deployed devnet router | **PASS** | [tx](https://explorer.solana.com/tx/4CFUvJrvmV13sNpGwv9c3CpFw8uhAtdJ5Jn3TojzCFFEQfKbDfVJ9N77PmVFbaErPqT9XChwLiqcok3ca24PNzy6?cluster=devnet) |
+
+Independently re-verified with `solana confirm <sig> --url devnet -v`:
+`Status: Ok`, `Finalized` commitment.
+
+**Honest scope:** this is devnet, not mainnet (the router itself is only
+devnet-validated, not mainnet-audited). It proves the SDK's public API is a
+real, usable composability contract — it says nothing about the router's own
+privacy guarantees (K-anonymity, decoy indistinguishability), which is that
+PR's own claim to measure, not this one's. The protocol's "real" leg targets a
+seed-derived sibling address of the agent's own wallet (the router rejects
+self-destination legs) rather than an external payee, so this is noise-shaping
+for the agent's own footprint, not a payment-privacy path. Not enabled by
+default — `weight = 0.0` in `cooker.example.toml`.
+
 ### 2. Crash recovery — real SIGKILL, not a mocked failure
 
 ```
@@ -184,6 +217,7 @@ protocols/      the extension point — one file per protocol
 jupiter.rs      swap noise across configurable mints via Jupiter Swap API (implemented)
 marinade.rs     liquid staking — deposit SOL, mint mSOL (implemented)
 orca_lp.rs      concentrated liquidity positions (skeleton, see TODO)
+supersonic_cast.rs  casts noise transfers through the supersonic-tx router (implemented, opt-in)
 
 Adding a new protocol means implementing the `Protocol` trait
 (`src/protocols/mod.rs`) and registering its name in `ProtocolRegistry::from_config`.
@@ -225,6 +259,10 @@ cargo test --release
 
 # 8. Prove crash recovery survives a real SIGKILL (no network/wallet needed)
 ./scripts/recovery_test.sh
+
+# 9. Prove the supersonic_cast protocol against devnet (opt-in, not enabled by
+#    default — see Status table)
+cargo run --release --bin supersonic_cast_test -- <funded-devnet-keypair.json>
 ```
 
 All behavior-relevant parameters (mint list, swap size floor, timing
@@ -238,6 +276,7 @@ in `cooker.toml` — see `cooker.example.toml` for every available field.
 | `jupiter_swap`  | **Implemented** — real quote+swap via Jupiter Swap API, validated with 2 signed mainnet transactions (see proof table above) |
 | `marinade_stake`| **Implemented** — hand-built `deposit` instruction against Marinade State with derived PDAs, validated with 1 signed mainnet transaction (see proof table above) |
 | `orca_lp`       | Skeleton — instruction building TODO |
+| `supersonic_cast` | **Implemented** — casts bundles through the `supersonic-tx` router (PR #1, Jmkoygg) via its public SDK, validated with 1 signed devnet transaction (see "1b. Composability" above). Not a router reimplementation; `weight = 0.0` in `cooker.example.toml` by default. |
 
 ## Known limitations
 
@@ -264,6 +303,12 @@ in `cooker.toml` — see `cooker.example.toml` for every available field.
   above (real SIGKILL, no mocks) and the existing mainnet transaction proof
   (real signed txs, no mocks) — both smaller in scope than a full soak, but
   both actually executed, not modeled.
+- `supersonic_cast` is validated on devnet only (the router it composes
+  through, `solanabr/supersonic-tx` PR #1, is itself devnet-validated, not
+  mainnet-audited), and its "real" leg targets a seed-derived sibling address
+  of the agent's own wallet rather than an external payee — it shapes the
+  agent's own on-chain footprint, it does not add payment-destination privacy.
+  See "1b. Composability" above.
 - The crash-recovery test (`scripts/recovery_test.sh`) exercises the
   checkpoint save/resume code path directly, not the full `cooker run` fleet
   against a live RPC — running the real fleet under repeated SIGKILL against

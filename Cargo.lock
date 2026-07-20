@@ -28,10 +28,12 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "solana-client",
  "solana-sdk",
  "solana-system-interface",
  "solana-transaction-status",
+ "supersonic-sdk",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -6086,6 +6088,18 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "supersonic-sdk"
+version = "0.1.0"
+source = "git+https://github.com/Jmkoygg/supersonic-tx?rev=52be0375c2b362b4a213ca919844483d45aa910f#52be0375c2b362b4a213ca919844483d45aa910f"
+dependencies = [
+ "rand 0.8.7",
+ "rand_chacha 0.3.1",
+ "serde",
+ "sha2 0.10.9",
+ "solana-sdk",
+]
 
 [[package]]
 name = "syn"

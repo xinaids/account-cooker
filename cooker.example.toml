@@ -38,3 +38,13 @@ params = { max_balance_fraction = 0.02, min_stake_lamports = 1000000 }
 name = "orca_lp"
 weight = 1.0
 params = { position_size_lamports_max = 50000000 }
+
+# Not enabled by default (weight = 0.0): casts the agent's noise transfers through
+# the supersonic-tx router (solanabr/supersonic-tx PR #1, Jmkoygg) instead of a
+# plain SOL transfer, so a self-transfer looks like an intent-ambiguous K-leg
+# bundle on-chain. Real composability with a third party's deployed program, not a
+# reimplementation — see COMPOSABILITY.md. Set weight > 0 to opt in.
+[[protocols]]
+name = "supersonic_cast"
+weight = 0.0
+params = { max_balance_fraction = 0.01, min_cast_lamports = 1000000, k = 8 }

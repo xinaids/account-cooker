@@ -21,6 +21,10 @@ path = "src/bin/marinade_test.rs"
 name = "recovery_test"
 path = "src/bin/recovery_test.rs"
 
+[[bin]]
+name = "supersonic_cast_test"
+path = "src/bin/supersonic_cast_test.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 solana-client = "2.1"
@@ -43,6 +47,11 @@ reqwest = { version = "0.12", features = ["json"] }
 base64 = "0.22"
 bincode = "1.3"
 solana-system-interface = "1.0"
+sha2 = "0.10"
+# supersonic_cast protocol: real third-party composition with solanabr/supersonic-tx
+# PR #1 (Jmkoygg, branch feat/intent-ambiguous-router)'s public SDK, MIT-licensed. Not
+# a reimplementation of the router — see COMPOSABILITY.md.
+supersonic-sdk = { git = "https://github.com/Jmkoygg/supersonic-tx", rev = "52be0375c2b362b4a213ca919844483d45aa910f" }
 
 [dev-dependencies]
 tempfile = "3"
