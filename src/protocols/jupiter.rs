@@ -4,6 +4,7 @@ use rand::Rng;
 use serde::Deserialize;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
+    pubkey::Pubkey,
     signature::{Keypair, Signature, Signer},
     transaction::VersionedTransaction,
 };
@@ -107,6 +108,11 @@ impl Protocol for JupiterSwap {
         let balance_lamports = rpc.get_balance(&wallet.pubkey()).await?;
         // Keep a safety reserve for fees/rent so the agent never drains itself.
         let usable = (balance_lamports as f64 * self.max_balance_fraction) as u64;
+        if usable == 0 {
+            anyhow::bail!(
+                "wallet balance too low to compute a non-zero swap amount, skipping this tick"
+            );
+        }
         if usable < self.min_swap_lamports {
             anyhow::bail!("balance too low for a believable swap, skipping this tick");
         }
@@ -164,11 +170,63 @@ impl Protocol for JupiterSwap {
 
         let tx_bytes = base64_decode(&swap.swap_transaction)?;
         let mut tx: VersionedTransaction = bincode::deserialize(&tx_bytes)?;
+
+        // Don't blind-sign whatever the API handed back: check the minimal
+        // shape a single-wallet swap must have before this wallet's key ever
+        // touches it. This can't verify semantic intent (which pools it
+        // routes through, etc.) but it does guarantee the only party that
+        // can be asked to sign is this wallet, and nothing hijacked the fee
+        // payer slot.
+        validate_swap_transaction(&tx, &wallet.pubkey())?;
+
         tx.signatures[0] = wallet.sign_message(&tx.message.serialize());
+
+        // Simulate before sending — same pattern as marinade.rs /
+        // supersonic_cast.rs: surface detailed logs on failure instead of
+        // committing an unverified transaction to the network first.
+        let sim = rpc.simulate_transaction(&tx).await?;
+        if let Some(err) = &sim.value.err {
+            let logs = sim
+                .value
+                .logs
+                .as_ref()
+                .map(|l| l.join("\n"))
+                .unwrap_or_default();
+            anyhow::bail!("jupiter swap simulation failed: {err:?}\nlogs:\n{logs}");
+        }
 
         let sig = rpc.send_and_confirm_transaction(&tx).await?;
         Ok(sig)
     }
+}
+
+/// Minimal shape check on a swap transaction built by a third-party HTTP API,
+/// before this wallet ever signs it: exactly one required signer, and that
+/// signer/fee-payer is this wallet. Signers are always drawn from the
+/// message's static account keys (never from address-lookup-table-loaded
+/// accounts), so this holds for both legacy and v0 messages.
+fn validate_swap_transaction(tx: &VersionedTransaction, wallet: &Pubkey) -> anyhow::Result<()> {
+    if tx.signatures.is_empty() {
+        anyhow::bail!("jupiter swap transaction has no signature slots");
+    }
+    let header = tx.message.header();
+    if header.num_required_signatures != 1 {
+        anyhow::bail!(
+            "jupiter swap transaction requires {} signer(s), expected exactly 1 (this wallet)",
+            header.num_required_signatures
+        );
+    }
+    let fee_payer = tx
+        .message
+        .static_account_keys()
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("jupiter swap transaction has no account keys"))?;
+    if fee_payer != wallet {
+        anyhow::bail!(
+            "jupiter swap transaction fee payer {fee_payer} does not match wallet {wallet}"
+        );
+    }
+    Ok(())
 }
 
 fn base64_decode(s: &str) -> anyhow::Result<Vec<u8>> {

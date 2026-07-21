@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     // balance, min_stake_lamports floor is low enough not to block it.
     let params: toml::Table = toml::from_str(
         r#"
-        max_balance_fraction = 0.20
+        max_balance_fraction = 0.02
         min_stake_lamports = 1000000
         "#,
     )?;

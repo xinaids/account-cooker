@@ -184,6 +184,11 @@ impl Protocol for MarinadeStake {
     async fn execute(&self, rpc: &RpcClient, wallet: &Keypair) -> anyhow::Result<Signature> {
         let balance_lamports = rpc.get_balance(&wallet.pubkey()).await?;
         let usable = (balance_lamports as f64 * self.max_balance_fraction) as u64;
+        if usable == 0 {
+            anyhow::bail!(
+                "wallet balance too low to compute a non-zero stake amount, skipping this tick"
+            );
+        }
         if usable < self.min_stake_lamports {
             anyhow::bail!("balance too low for a believable stake, skipping this tick");
         }
