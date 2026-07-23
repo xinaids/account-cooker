@@ -10,6 +10,8 @@ pub struct CookerConfig {
     pub wallets: Vec<WalletConfig>,
     pub timing: TimingConfig,
     pub protocols: Vec<ProtocolConfig>,
+    #[serde(default)]
+    pub consolidation: ConsolidationConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -43,6 +45,57 @@ pub struct ProtocolConfig {
     pub params: toml::Table,
 }
 
+/// Periodic fund consolidation/redistribution across one operator's own
+/// fleet (`src/consolidation.rs`). Opt-in: `enabled` defaults to `false`,
+/// matching the existing precedent for new, less-battle-tested behavior
+/// (`supersonic_cast`'s `weight = 0.0` default in `cooker.example.toml`) —
+/// the conservative choice for a feature that moves real funds.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ConsolidationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Mean hours between consolidation transfers — deliberately a much
+    /// longer cadence than noise-transaction timing, since "periodically
+    /// consolidates" describes fleet-housekeeping, not a per-tick action.
+    #[serde(default = "default_consolidation_mean_hours")]
+    pub mean_interval_hours: f64,
+    /// Standard deviation (log-normal, via the same `timing::sample_interval_secs`
+    /// the noise scheduler uses) — controls how irregular the consolidation
+    /// cadence itself is, so it isn't a predictable fixed-period tell.
+    #[serde(default = "default_consolidation_stddev_hours")]
+    pub stddev_interval_hours: f64,
+    /// Minimum fraction of the source wallet's spendable balance moved per
+    /// transfer.
+    #[serde(default = "default_fraction_min")]
+    pub fraction_min: f64,
+    /// Maximum fraction of the source wallet's spendable balance moved per
+    /// transfer.
+    #[serde(default = "default_fraction_max")]
+    pub fraction_max: f64,
+    /// A wallet needs at least this many lamports to be eligible as a
+    /// consolidation source this tick.
+    #[serde(default = "default_min_balance_lamports")]
+    pub min_balance_lamports: u64,
+    /// Always left behind in the source wallet after a transfer, so it can
+    /// keep paying fees/rent for ongoing noise-transaction activity.
+    #[serde(default = "default_reserve_lamports")]
+    pub reserve_lamports: u64,
+}
+
+impl Default for ConsolidationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mean_interval_hours: default_consolidation_mean_hours(),
+            stddev_interval_hours: default_consolidation_stddev_hours(),
+            fraction_min: default_fraction_min(),
+            fraction_max: default_fraction_max(),
+            min_balance_lamports: default_min_balance_lamports(),
+            reserve_lamports: default_reserve_lamports(),
+        }
+    }
+}
+
 fn default_agent_count() -> usize {
     5
 }
@@ -51,6 +104,24 @@ fn default_skip_day_prob() -> f64 {
 }
 fn default_weight() -> f64 {
     1.0
+}
+fn default_consolidation_mean_hours() -> f64 {
+    72.0
+}
+fn default_consolidation_stddev_hours() -> f64 {
+    48.0
+}
+fn default_fraction_min() -> f64 {
+    0.05
+}
+fn default_fraction_max() -> f64 {
+    0.20
+}
+fn default_min_balance_lamports() -> u64 {
+    10_000_000
+}
+fn default_reserve_lamports() -> u64 {
+    5_000_000
 }
 
 impl CookerConfig {
@@ -74,6 +145,21 @@ impl CookerConfig {
         for w in &self.wallets {
             if !Path::new(&w.keypair_path).exists() {
                 anyhow::bail!("keypair file not found: {}", w.keypair_path);
+            }
+        }
+        if self.consolidation.enabled {
+            if self.wallets.len() < 2 {
+                anyhow::bail!(
+                    "consolidation.enabled requires at least 2 wallets to move funds between"
+                );
+            }
+            if !(0.0..=1.0).contains(&self.consolidation.fraction_min)
+                || !(0.0..=1.0).contains(&self.consolidation.fraction_max)
+            {
+                anyhow::bail!("consolidation.fraction_min/fraction_max must be within [0.0, 1.0]");
+            }
+            if self.consolidation.fraction_min > self.consolidation.fraction_max {
+                anyhow::bail!("consolidation.fraction_min must be <= fraction_max");
             }
         }
         Ok(())

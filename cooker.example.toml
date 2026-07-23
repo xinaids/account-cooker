@@ -48,3 +48,19 @@ params = { position_size_lamports_max = 50000000 }
 name = "supersonic_cast"
 weight = 0.0
 params = { max_balance_fraction = 0.01, min_cast_lamports = 1000000, k = 8 }
+
+# Not enabled by default (enabled = false): periodically moves a small,
+# randomized fraction of one wallet's balance to another randomly-chosen
+# sibling wallet in this same fleet — the "periodically consolidates and
+# redistributes assets" behavior from the bounty brief. Neither the pair nor
+# the timing is fixed (see src/consolidation.rs), so it doesn't itself become
+# a predictable "hub" tell. Set enabled = true to opt in; requires at least 2
+# configured wallets.
+[consolidation]
+enabled = false
+mean_interval_hours = 72.0
+stddev_interval_hours = 48.0
+fraction_min = 0.05
+fraction_max = 0.20
+min_balance_lamports = 10000000
+reserve_lamports = 5000000

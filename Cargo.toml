@@ -14,6 +14,10 @@ name = "timing_harness"
 path = "src/bin/timing_harness.rs"
 
 [[bin]]
+name = "clustering_harness"
+path = "src/bin/clustering_harness.rs"
+
+[[bin]]
 name = "marinade_test"
 path = "src/bin/marinade_test.rs"
 

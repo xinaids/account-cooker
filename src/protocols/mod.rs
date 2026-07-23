@@ -46,8 +46,18 @@ impl ProtocolRegistry {
 
     /// Pick one protocol at random, weighted by configured frequency.
     pub fn pick(&self) -> &dyn Protocol {
+        self.pick_with_rng(&mut rand::thread_rng())
+    }
+
+    /// Same weighted selection as `pick`, but taking an explicit RNG source.
+    /// Callers that need reproducibility (e.g. `clustering_harness`, which
+    /// must be seed-deterministic) supply a seeded RNG instead of the real
+    /// agent's `thread_rng()` — this is the exact weighting logic the live
+    /// scheduler uses, not a reimplementation, so a harness built on it
+    /// measures what actually ships.
+    pub fn pick_with_rng(&self, rng: &mut impl Rng) -> &dyn Protocol {
         let total: f64 = self.entries.iter().map(|(w, _)| w).sum();
-        let mut roll = rand::thread_rng().gen_range(0.0..total);
+        let mut roll = rng.gen_range(0.0..total);
         for (w, p) in &self.entries {
             if roll < *w {
                 return p.as_ref();
@@ -55,11 +65,7 @@ impl ProtocolRegistry {
             roll -= w;
         }
         // Fallback (floating point edge case)
-        self.entries
-            .choose(&mut rand::thread_rng())
-            .unwrap()
-            .1
-            .as_ref()
+        self.entries.choose(rng).unwrap().1.as_ref()
     }
 
     pub fn len(&self) -> usize {

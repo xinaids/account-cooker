@@ -1,8 +1,10 @@
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::signature::read_keypair_file;
 use std::sync::Arc;
 
 use crate::agent::Agent;
 use crate::config::CookerConfig;
+use crate::consolidation::{self, FleetWallet};
 use crate::protocols::ProtocolRegistry;
 
 /// Spawns one independent async task per wallet, each running its own agent
@@ -33,6 +35,29 @@ pub async fn run_fleet(cfg: CookerConfig, agent_override: Option<usize>) -> anyh
 
         handles.push(tokio::spawn(async move {
             agent.run_forever(rpc, registry).await;
+        }));
+    }
+
+    if cfg.consolidation.enabled {
+        let mut fleet_wallets = Vec::with_capacity(wallet_count);
+        for wallet_cfg in cfg.wallets.iter().take(wallet_count) {
+            let keypair = read_keypair_file(&wallet_cfg.keypair_path).map_err(|e| {
+                anyhow::anyhow!("failed to load keypair {}: {e}", wallet_cfg.keypair_path)
+            })?;
+            let label = wallet_cfg.label.clone().unwrap_or_else(|| {
+                solana_sdk::signer::Signer::pubkey(&keypair).to_string()[..8].to_string()
+            });
+            fleet_wallets.push(FleetWallet { label, keypair });
+        }
+        tracing::info!(
+            "consolidation enabled: mean_interval_hours={} across {} wallet(s)",
+            cfg.consolidation.mean_interval_hours,
+            fleet_wallets.len()
+        );
+        let rpc = Arc::clone(&rpc);
+        let consolidation_cfg = cfg.consolidation.clone();
+        handles.push(tokio::spawn(async move {
+            consolidation::run_consolidation_loop(fleet_wallets, rpc, consolidation_cfg).await;
         }));
     }
 

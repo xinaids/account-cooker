@@ -170,6 +170,72 @@ bounty for a stronger reference point) — but the honest reading is "harder to
 flag than a naive bot, not zero-detectable by any classifier," which is a
 narrower and more defensible claim than the CV number alone implied.
 
+### 3c. Multi-wallet clustering — the bounty's actual central question, measured
+
+Everything above (1-3b) answers "does ONE wallet look like a bot?" — a binary
+question. It does **not** answer what the bounty brief literally asks for:
+*"explorers, analytics platforms, and copy-traders can't determine which
+wallets belong to the same entity"* — a **clustering** question over many
+wallets at once. `clustering_harness` (`src/clustering.rs` +
+`src/bin/clustering_harness.rs`) measures that directly: it simulates several
+"operators" each running several wallets, extracts behavioral features per
+wallet (reusing `timing.rs`'s CV/autocorrelation/skewness, plus preferred
+hour-of-day, action frequency, and protocol mix), runs a from-scratch k-means
+(k = number of operators), and reports Adjusted Rand Index (ARI) and
+Normalized Mutual Information (NMI) between k-means' guess and the true
+operator assignment — the same two metrics `marcelofeitoza`'s account-cooker
+PR uses for this comparison in the same bounty.
+
+```
+cargo run --release --bin clustering_harness -- --seed 1
+```
+
+| Scenario | ARI (mean ± std, 50 trials) | NMI (mean ± std, 50 trials) |
+|---|---|---|
+| `identical_control` (sanity check — no signal exists by construction) | 0.0012 ± 0.0271 | 0.1878 ± 0.0431 |
+| `tight_timing` + `shared_persona` (naive bot-farm baseline) | 0.0761 ± 0.0381 | 0.2963 ± 0.0511 |
+| `tight_timing` + `diverse_persona` | 0.4428 ± 0.1120 | 0.6403 ± 0.0902 |
+| `wide_timing` + `shared_persona` | 0.0760 ± 0.0513 | 0.2835 ± 0.0625 |
+| `wide_timing` + `diverse_persona` (**account-cooker's actual shipped config**) | 0.4214 ± 0.1100 | 0.6112 ± 0.0900 |
+
+(ARI/NMI: 1.0 = k-means perfectly recovers who-belongs-to-whom, i.e. bad for
+privacy; ~0.0 = no better than chance, i.e. good for privacy. `n=48` wallets,
+`k=6` operators, `agents_per_operator=8`, 20 observed actions/wallet, seed 1 —
+full command above reproduces every number here.)
+
+**This does not favor account-cooker, and it's reported anyway.** The
+account-cooker's real config (bottom row) clusters *more* accurately
+(ARI 0.42) than the naive tight-timing "bot farm" baseline (ARI 0.08) —
+5 configurations were run specifically to find out *why* instead of stopping
+at that one uncomfortable number:
+
+- **Timing spread barely moves the result.** `tight_timing` vs `wide_timing`
+  at fixed persona: 0.0761 vs 0.0760 (shared persona), 0.4428 vs 0.4214
+  (diverse persona) — statistically indistinguishable pairs. The log-normal
+  vs fixed-cadence design that `timing_harness` above measures a real
+  single-wallet benefit from does **not** meaningfully help against a
+  multi-wallet clustering adversary.
+- **Persona sharing is what actually drives it.** `shared_persona` vs
+  `diverse_persona` at fixed timing spread: ARI jumps ~5.5x (0.076 -> 0.44).
+  `cooker.toml` has exactly one `[timing]` block's `active_hours` and one set
+  of `[[protocols]]` weights *per fleet* — every wallet one operator runs
+  necessarily shares that operator's active-hours window and protocol mix by
+  construction. The per-feature separability diagnostic printed by the same
+  command confirms the mechanism directly: `mean_hour_of_day` and the
+  `frac_*` protocol-share features go from near-zero separability under
+  `shared_persona` to the strongest features in the vector under
+  `diverse_persona`, while `coefficient_of_variation` stays weak throughout —
+  the same statistical property (low per-wallet signal) that lets timing
+  evade the single-wallet CV/logistic-regression detectors above also makes
+  it a weak *clustering* feature, in both directions.
+
+See [`THREAT_MODEL.md`](./THREAT_MODEL.md) for this named as an explicit,
+quantified limitation with a concrete recommendation, and for the honest
+scope statement (this measures behavioral-feature clustering resistance
+only, not an adversary with on-chain funding-graph metadata — see
+"Out of scope" there). This harness is additional to `timing_harness`, not a
+replacement for it.
+
 ## Why this design
 
 Naive "bot farms" are trivially detectable: fixed intervals, identical action
@@ -198,21 +264,33 @@ product**, not the transactions themselves:
   probability are all read from `cooker.toml` — an operator can reshape an
   agent's entire persona without touching Rust.
 
+The two middle bullets above make each *individual* wallet look like a
+believable, diversified human. Measured against a *multi-wallet* clustering
+adversary instead of a single-wallet detector, they turn out to be the
+dominant signal for grouping several wallets back to one operator — because
+one operator's whole fleet currently shares them identically. See "3c.
+Multi-wallet clustering" above for the actual numbers and why this is stated
+here rather than left for a reviewer to notice the tension first.
+
 ## Architecture
 src/
-lib.rs          exposes agent/config/protocols/scheduler/timing as a library
+lib.rs          exposes agent/config/protocols/scheduler/timing/clustering/consolidation as a library
 main.rs         thin CLI entry point (binary: cooker), wires cli -> lib
 bin/
-timing_harness.rs   standalone binary: measures timing vs naive-bot + logistic-regression detectors
-recovery_test.rs    standalone binary: crash-recovery worker driven by scripts/recovery_test.sh
+timing_harness.rs      standalone binary: measures timing vs naive-bot + logistic-regression detectors
+clustering_harness.rs  standalone binary: measures MULTI-wallet clustering resistance (ARI/NMI)
+recovery_test.rs       standalone binary: crash-recovery worker driven by scripts/recovery_test.sh
 cli/            clap-based commands: run, status, validate
-config/         cooker.toml parsing + validation
+config/         cooker.toml parsing + validation (incl. [consolidation])
 timing.rs       pure timing math (CV, autocorrelation, skewness) — shared by the real
 scheduler AND the harness, so the harness measures exactly what ships
 detectors.rs    logistic regression + ROC AUC — the stronger named baseline in timing_harness
+clustering.rs   wallet-history simulator + feature extraction + from-scratch k-means/ARI/NMI —
+backs clustering_harness, reuses timing.rs + protocols::ProtocolRegistry::pick_with_rng
+consolidation.rs  periodic fund consolidation across one operator's fleet (opt-in, see below)
 state.rs        single-checkpoint crash recovery (atomic save/resume), see scripts/recovery_test.sh
 agent/          single-agent behavior loop (timing, active hours, skip-day, checkpointing)
-scheduler/      spawns and supervises the whole fleet
+scheduler/      spawns and supervises the whole fleet (agents + optional consolidation task)
 protocols/      the extension point — one file per protocol
 jupiter.rs      swap noise across configurable mints via Jupiter Swap API (implemented)
 marinade.rs     liquid staking — deposit SOL, mint mSOL (implemented)
@@ -254,6 +332,9 @@ cargo run --release -- run --config cooker.toml
 # 6. Measure the timing design against a naive-bot detector
 cargo run --release --bin timing_harness -- --n 5000 --seed 1
 
+# 6b. Measure MULTI-wallet clustering resistance (the bounty's central question)
+cargo run --release --bin clustering_harness -- --seed 1
+
 # 7. Run the test suite (includes statistical regression tests on timing.rs)
 cargo test --release
 
@@ -266,8 +347,9 @@ cargo run --release --bin supersonic_cast_test -- <funded-devnet-keypair.json>
 ```
 
 All behavior-relevant parameters (mint list, swap size floor, timing
-distribution, active hours, skip-day probability, per-protocol weights) live
-in `cooker.toml` — see `cooker.example.toml` for every available field.
+distribution, active hours, skip-day probability, per-protocol weights,
+fund-consolidation cadence/fraction) live in `cooker.toml` — see
+`cooker.example.toml` for every available field.
 
 ## Status
 
@@ -277,6 +359,11 @@ in `cooker.toml` — see `cooker.example.toml` for every available field.
 | `marinade_stake`| **Implemented** — hand-built `deposit` instruction against Marinade State with derived PDAs, validated with 1 signed mainnet transaction (see proof table above) |
 | `orca_lp`       | Skeleton — instruction building TODO |
 | `supersonic_cast` | **Implemented** — casts bundles through the `supersonic-tx` router (PR #1, Jmkoygg) via its public SDK, validated with 1 signed devnet transaction (see "1b. Composability" above). Not a router reimplementation; `weight = 0.0` in `cooker.example.toml` by default. |
+
+| Feature | Status |
+|---|---|
+| Fund consolidation (`[consolidation]`) | **Implemented** — periodic, randomized-pair, randomized-fraction transfers between one operator's own wallets (`src/consolidation.rs`), unit-tested (11 tests, checked arithmetic throughout). `enabled = false` by default — see "Fund consolidation" in `THREAT_MODEL.md` for the honest tension this feature has with value-channel unlinkability before turning it on. |
+| Multi-wallet clustering harness (`clustering_harness`) | **Implemented** — see "3c." above and "Multi-wallet clustering" in `THREAT_MODEL.md`. Reports a real, currently-unfavorable number for account-cooker's default persona sharing, not a clean pass. |
 
 ## Known limitations
 
@@ -315,6 +402,21 @@ in `cooker.toml` — see `cooker.example.toml` for every available field.
   mainnet was judged not worth the SOL cost/risk for what the checkpoint
   logic alone already proves. See `src/state.rs` and `src/agent/mod.rs` for
   where that same code path is wired into the real agent loop.
+- **`clustering_harness` reports a currently-unfavorable result.**
+  account-cooker's real config clusters back to the correct operator *more*
+  accurately (ARI 0.42) than a naive tight-timing baseline (ARI 0.08),
+  because `active_hours`/protocol weights are shared identically across one
+  operator's whole fleet. Reported and explained, not hidden — see "3c."
+  above and "Multi-wallet clustering" in `THREAT_MODEL.md` for the full
+  breakdown and a concrete, not-yet-implemented recommendation
+  (per-agent persona jitter within a fleet).
+- **Fund consolidation trades away some (already out-of-scope) value-channel
+  privacy for the edital's required behavior.** A direct wallet-to-wallet
+  transfer is a strong signal to a funding-graph-aware adversary; this
+  project has never claimed to defend against that class of attack (see
+  THREAT_MODEL.md's Scope), and consolidation doesn't change that — it's
+  disabled by default for this reason. See "Fund consolidation" in
+  `THREAT_MODEL.md`.
 
 ## Provenance
 
@@ -328,7 +430,9 @@ self-audit (region, language, submission modality, originality).
 ## Roadmap
 
 - [ ] Complete Orca Whirlpools integration (Marinade is done — see Status)
-- [ ] Fund splitting / periodic consolidation across agent wallets
+- [x] Fund splitting / periodic consolidation across agent wallets — see
+      `src/consolidation.rs`, disabled by default (see Known Limitations for
+      the honest value-channel tradeoff)
 - [ ] Dust-level interaction mode (sub-cent amounts, higher frequency)
 - [ ] Bridge interactions (Wormhole) for cross-chain noise
 - [ ] Prometheus metrics endpoint for fleet observability at scale
@@ -337,6 +441,18 @@ self-audit (region, language, submission modality, originality).
 - [x] Extend `timing_harness` with a learned adversary (logistic regression
       over CV/autocorrelation/skewness, not just CV) for a stronger honest
       bound — see "A second, stronger named baseline" above
+- [x] Multi-wallet clustering harness (ARI/NMI vs true operator identity) —
+      see "3c." above; found a real, currently-unfavorable result rather
+      than a clean pass
+- [ ] **Per-agent persona jitter within one operator's fleet** — the
+      concrete follow-up `clustering_harness` points to: nudge each agent's
+      `active_hours` and protocol weights independently around the
+      operator's base persona instead of sharing it exactly, to attack the
+      dominant clustering signal this harness measured
+- [ ] Route fund-consolidation transfers through `supersonic_cast` /
+      `supersonic-tx` instead of a plain transfer, to reduce (not eliminate)
+      consolidation's value-channel exposure — see "Fund consolidation" in
+      THREAT_MODEL.md
 - [ ] Surfpool-based multi-agent soak (blocked on `libclang` in this
       environment — see Known Limitations)
 

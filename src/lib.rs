@@ -1,5 +1,7 @@
 pub mod agent;
+pub mod clustering;
 pub mod config;
+pub mod consolidation;
 pub mod detectors;
 pub mod protocols;
 pub mod scheduler;
