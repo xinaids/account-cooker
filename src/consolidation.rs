@@ -3,11 +3,13 @@
 //! The bounty brief explicitly asks for a tool that "periodically
 //! consolidates and redistributes assets" across an operator's wallets —
 //! not implemented anywhere else in this crate until now. This module is
-//! that: on a randomized, configurable cadence (reusing the same
-//! `timing::sample_interval_secs` log-normal sampler the noise-transaction
-//! scheduler uses, just at hour instead of minute granularity), one wallet
-//! in the fleet transfers a small, randomized fraction of its balance to
-//! another randomly-chosen sibling wallet.
+//! that: on a randomized, configurable cadence (`timing::sample_interval_hours`
+//! — the same log-normal shape the noise-transaction scheduler's
+//! `sample_interval_secs` uses, but with its own hours-scale clamp, since
+//! reusing the minute-scale clamp here previously collapsed the cadence to a
+//! near-fixed interval — see docs/security-audit-2026-07-23.md, H-1), one
+//! wallet in the fleet transfers a small, randomized fraction of its balance
+//! to another randomly-chosen sibling wallet.
 //!
 //! Deliberately NOT the same wallet pair every time and NOT a fixed
 //! interval: a consolidation pattern that always moves funds
@@ -32,7 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::ConsolidationConfig;
-use crate::timing::sample_interval_secs;
+use crate::timing::sample_interval_hours;
 
 /// One fleet member consolidation can move funds between — just enough to
 /// sign and label a transfer, not a full `Agent` (consolidation runs as
@@ -108,9 +110,9 @@ pub async fn run_consolidation_loop(
     }
 
     loop {
-        let sleep_secs = sample_interval_secs(
-            cfg.mean_interval_hours * 60.0,
-            cfg.stddev_interval_hours * 60.0,
+        let sleep_secs = sample_interval_hours(
+            cfg.mean_interval_hours,
+            cfg.stddev_interval_hours,
             &mut rand::thread_rng(),
         );
         tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
