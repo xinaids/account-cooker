@@ -30,3 +30,20 @@ jobs:
 
       - name: Format check
         run: cargo fmt -- --check
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Full history, not just the latest commit — a leaked secret in
+          # an older commit is still a leaked secret even if a later commit
+          # removed it. Matches the full-history scan already done manually
+          # for docs/security-audit-2026-07-20.md; this job makes that
+          # check automatic on every push/PR instead of a one-time pass.
+          fetch-depth: 0
+
+      - name: Gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
