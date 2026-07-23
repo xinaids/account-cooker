@@ -10,7 +10,7 @@
 //! `timing::sample_interval_secs` and `protocols::ProtocolRegistry::pick_with_rng`
 //! — not a reimplementation, so this measures what actually ships.
 //!
-//! ## Two independent axes, five named scenarios
+//! ## Two independent axes, five named scenarios — plus a sixth, the fix
 //!
 //! An operator persona has two things that can vary: how WIDE its
 //! intra-operator timing spread is (tight/naive vs account-cooker's real
@@ -25,7 +25,7 @@
 //!   score near-zero ARI/NMI, it would mean this harness is unsound (e.g.
 //!   picking up on RNG-stream artifacts rather than real behavioral
 //!   signal), not that clustering is somehow "hard." It exists so the
-//!   other four numbers can be trusted.
+//!   other numbers can be trusted.
 //! - **`tight_timing + shared_persona`** — operators differ ONLY in a
 //!   per-operator mean interval (operators must differ in *something* or
 //!   there is nothing to cluster on at all — that fully signal-free setup
@@ -42,18 +42,30 @@
 //!   log-normal timing spread (std = 50-90% of mean, matching
 //!   THREAT_MODEL.md's named defense), but active_hours and protocol
 //!   weights held identical across operators.
-//! - **`wide_timing + diverse_persona`** — full real diversity on every
-//!   axis: wide log-normal timing, independently randomized active_hours,
-//!   independently randomized protocol weights, independent per-agent RNG.
-//!   This is the config family account-cooker actually ships in
-//!   `cooker.example.toml`.
+//! - **`wide_timing + diverse_persona` (PRE-fix)** — full diversity on
+//!   every axis AT THE OPERATOR LEVEL: wide log-normal timing,
+//!   independently randomized active_hours, independently randomized
+//!   protocol weights, independent per-agent RNG — but every agent within
+//!   one operator still shares that operator's exact active_hours/protocol
+//!   weights. This was the config family account-cooker shipped in
+//!   `cooker.example.toml` before persona jitter (`src/persona.rs`).
+//! - **`wide_timing + diverse_persona + agent_jitter` (POST-fix)** — same
+//!   operator-level generation as the row above (same `build_operator`
+//!   call, same RNG draws — see `build_operators`), but each AGENT within
+//!   an operator now derives its own active_hours/protocol weights via
+//!   `persona::jittered_active_hours_minutes` /
+//!   `persona::jittered_protocol_weights` at `PersonaJitterConfig::default()`'s
+//!   magnitude, the same defaults `cooker.example.toml` ships. Because
+//!   operator generation is held identical between this row and the one
+//!   above, any ARI/NMI difference between them isolates the effect of
+//!   per-agent persona jitter alone.
 //!
 //! Splitting the axes this way exists because the first version of this
 //! harness compared only `tight_timing+shared_persona` (naive) against
 //! `wide_timing+diverse_persona` (real) and got a result that does NOT
 //! favor account-cooker: the "real" config clustered *more* accurately
 //! than the "naive" one. Collapsing two axes into one comparison couldn't
-//! say why. The 5-scenario breakdown (plus the per-feature separability
+//! say why. The scenario breakdown (plus the per-feature separability
 //! diagnostic printed below the main table) can — see the numbers in
 //! README.md / THREAT_MODEL.md for what it actually shows and why this
 //! result is reported as-is rather than reshaped until it looked better.
@@ -80,10 +92,11 @@
 
 use account_cooker::clustering::{
     adjusted_rand_index, extract_features, feature_separability, kmeans, normalized_mutual_info,
-    simulate_wallet, OperatorConfig,
+    simulate_wallet_with_window, OperatorConfig,
 };
-use account_cooker::config::{ProtocolConfig, TimingConfig};
+use account_cooker::config::{PersonaJitterConfig, ProtocolConfig, TimingConfig};
 use account_cooker::detectors::standardize;
+use account_cooker::persona;
 use account_cooker::protocols::ProtocolRegistry;
 use clap::Parser;
 use rand::{Rng, SeedableRng};
@@ -125,6 +138,16 @@ struct Args {
     kmeans_restarts: usize,
     #[arg(long, default_value_t = 1)]
     seed: u64,
+    /// Persona-jitter magnitude used by the POST-fix scenario only —
+    /// defaults to exactly `PersonaJitterConfig::default()`, the same
+    /// value `cooker.example.toml` ships, so the default invocation
+    /// measures the real shipped fix. Overridable here so the
+    /// magnitude-vs-believability tradeoff can be explored without editing
+    /// code (see README.md's "3c." for what a larger value costs).
+    #[arg(long, default_value_t = PersonaJitterConfig::default().active_hours_minutes)]
+    jitter_active_hours_minutes: f64,
+    #[arg(long, default_value_t = PersonaJitterConfig::default().protocol_weight_fraction)]
+    jitter_protocol_weight_fraction: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -153,6 +176,17 @@ enum Persona {
 enum Scenario {
     IdenticalControl,
     Combo(TimingSpread, Persona),
+    /// `wide_timing + diverse_persona` (account-cooker's real operator-level
+    /// config) PLUS per-agent persona jitter at `PersonaJitterConfig`'s
+    /// default magnitude — the fix `THREAT_MODEL.md`'s "Multi-wallet
+    /// clustering" section named but did not implement. Operator
+    /// generation is byte-identical to `Combo(Wide, Diverse)` (same
+    /// `build_operator` call, same RNG draws, see `build_operators`) — the
+    /// ONLY difference is that each agent's active_hours/protocol weights
+    /// are no longer the operator's exact values, so this scenario isolates
+    /// the fix's effect rather than conflating it with a change in
+    /// operator-level diversity.
+    RealConfigPostFix,
 }
 
 impl Scenario {
@@ -167,8 +201,26 @@ impl Scenario {
             }
             Scenario::Combo(TimingSpread::Wide, Persona::Shared) => "wide_timing + shared_persona",
             Scenario::Combo(TimingSpread::Wide, Persona::Diverse) => {
-                "wide_timing + diverse_persona (account-cooker's real config)"
+                "wide_timing + diverse_persona (account-cooker's real config, PRE-fix)"
             }
+            Scenario::RealConfigPostFix => {
+                "wide_timing + diverse_persona + agent_jitter (POST-fix, default jitter)"
+            }
+        }
+    }
+
+    /// `Some(jitter config)` for the post-fix scenario, taken from `args`
+    /// (CLI-overridable, defaults to `PersonaJitterConfig::default()` —
+    /// see `Args`); `None` for every other scenario, meaning every agent
+    /// within one operator shares that operator's exact persona — the
+    /// pre-fix / naive-baseline behavior those scenarios exist to model.
+    fn agent_jitter(&self, args: &Args) -> Option<PersonaJitterConfig> {
+        match self {
+            Scenario::RealConfigPostFix => Some(PersonaJitterConfig {
+                active_hours_minutes: args.jitter_active_hours_minutes,
+                protocol_weight_fraction: args.jitter_protocol_weight_fraction,
+            }),
+            _ => None,
         }
     }
 }
@@ -251,6 +303,12 @@ fn build_operators(
                 protocols: default_protocol_mix(1.0, 1.0, 1.0),
             },
             Scenario::Combo(spread, persona) => build_operator(spread, persona, rng),
+            // Same operator-persona generation as Combo(Wide, Diverse) —
+            // deliberately, so the two scenarios are only ever compared on
+            // the one axis that differs between them (per-agent jitter).
+            Scenario::RealConfigPostFix => {
+                build_operator(TimingSpread::Wide, Persona::Diverse, rng)
+            }
         })
         .collect()
 }
@@ -265,20 +323,87 @@ struct TrialData {
 /// shared trial RNG — mirroring THREAT_MODEL.md's "no shared entropy
 /// across agents" defense — siblings only ever share the operator CONFIG
 /// (which is the thing under test), never a random stream.
+///
+/// Exactly ONE `rng.gen()` draw is made per agent regardless of scenario
+/// (`agent_seed` below) — whether that seed is used ONLY to seed the
+/// wallet's own action-generation RNG (every scenario except the post-fix
+/// one) or ALSO fed through `persona::jittered_*` (post-fix scenario only)
+/// doesn't change how many values are drawn from the shared trial `rng`,
+/// since `persona::` re-hashes the seed through SHA-256 and spins up its
+/// own fresh `ChaCha8Rng` rather than drawing further from `rng`. This is
+/// what keeps the pre-existing 5 scenarios' numbers bit-for-bit unchanged
+/// by this function's extension to support a 6th.
 fn simulate_trial(scenario: Scenario, args: &Args, seed: u64) -> TrialData {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let operators = build_operators(scenario, args.operators, &mut rng);
+    let jitter = scenario.agent_jitter(args);
 
     let mut true_labels = Vec::new();
     let mut feature_rows = Vec::new();
 
     for (op_idx, operator) in operators.iter().enumerate() {
-        let registry = ProtocolRegistry::from_config(&operator.protocols)
+        let base_registry = ProtocolRegistry::from_config(&operator.protocols)
             .expect("harness-constructed protocol config is always valid");
+        let base_window = (
+            operator.timing.active_hours[0] as u32 * 60,
+            operator.timing.active_hours[1] as u32 * 60,
+        );
+
         for _ in 0..args.agents_per_operator {
-            let mut agent_rng = ChaCha8Rng::seed_from_u64(rng.gen());
-            let actions =
-                simulate_wallet(operator, &registry, args.actions_per_wallet, &mut agent_rng);
+            let agent_seed: u64 = rng.gen();
+            let mut agent_rng = ChaCha8Rng::seed_from_u64(agent_seed);
+
+            let actions = match &jitter {
+                None => simulate_wallet_with_window(
+                    operator,
+                    &base_registry,
+                    args.actions_per_wallet,
+                    base_window,
+                    &mut agent_rng,
+                ),
+                Some(j) => {
+                    // Synthetic harness wallets have no real Solana keypair
+                    // to derive an identity from — the per-agent seed
+                    // already drawn above (unique per agent, deterministic
+                    // given the trial seed) stands in for one, playing the
+                    // same role `wallet.pubkey().to_bytes()` plays in the
+                    // real `Agent::from_config`.
+                    let identity_bytes = agent_seed.to_le_bytes();
+
+                    let jittered_weights = persona::jittered_protocol_weights(
+                        &operator.protocols,
+                        j.protocol_weight_fraction,
+                        &identity_bytes,
+                    );
+                    let agent_protocols: Vec<ProtocolConfig> = operator
+                        .protocols
+                        .iter()
+                        .zip(jittered_weights)
+                        .map(|(p, weight)| ProtocolConfig {
+                            name: p.name.clone(),
+                            weight,
+                            params: p.params.clone(),
+                        })
+                        .collect();
+                    let agent_registry = ProtocolRegistry::from_config(&agent_protocols)
+                        .expect("jittered protocol config is always valid");
+
+                    let agent_window = persona::jittered_active_hours_minutes(
+                        operator.timing.active_hours,
+                        j.active_hours_minutes,
+                        &identity_bytes,
+                    );
+
+                    simulate_wallet_with_window(
+                        operator,
+                        &agent_registry,
+                        args.actions_per_wallet,
+                        agent_window,
+                        &mut agent_rng,
+                    )
+                }
+            };
+
             feature_rows.push(extract_features(&actions, &PROTOCOL_NAMES));
             true_labels.push(op_idx);
         }
@@ -357,6 +482,7 @@ fn main() {
         Scenario::Combo(TimingSpread::Tight, Persona::Diverse),
         Scenario::Combo(TimingSpread::Wide, Persona::Shared),
         Scenario::Combo(TimingSpread::Wide, Persona::Diverse),
+        Scenario::RealConfigPostFix,
     ];
 
     println!("| Scenario | ARI (mean ± std) | NMI (mean ± std) | ARI range | NMI range |");
@@ -446,5 +572,15 @@ fn main() {
         find. Every number above is reported as measured, including any \
         that don't favor account-cooker's current defaults — see \
         THREAT_MODEL.md for how each is scoped."
+    );
+    println!();
+    println!(
+        "Persona-jitter fix check: compare the 'wide_timing + diverse_persona \
+        (... PRE-fix)' row against '... + agent_jitter (POST-fix ...)' above. \
+        Operator-level generation is identical between the two (same \
+        build_operator call, same RNG draws — see build_operators in this \
+        file), so any ARI/NMI difference isolates the effect of per-agent \
+        persona jitter (src/persona.rs) alone, not a change in how operators \
+        themselves are generated."
     );
 }

@@ -3,6 +3,7 @@ pub mod clustering;
 pub mod config;
 pub mod consolidation;
 pub mod detectors;
+pub mod persona;
 pub mod protocols;
 pub mod scheduler;
 pub mod state;

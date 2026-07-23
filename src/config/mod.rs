@@ -12,6 +12,8 @@ pub struct CookerConfig {
     pub protocols: Vec<ProtocolConfig>,
     #[serde(default)]
     pub consolidation: ConsolidationConfig,
+    #[serde(default)]
+    pub persona_jitter: PersonaJitterConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -96,6 +98,67 @@ impl Default for ConsolidationConfig {
     }
 }
 
+/// Per-agent persona jitter: nudges each agent's derived `active_hours`
+/// window and protocol weights independently around the operator's base
+/// `[timing]` / `[[protocols]]` persona, instead of every wallet in a fleet
+/// sharing those values byte-for-byte. Implements the recommendation named
+/// (but not implemented) in `THREAT_MODEL.md`'s "Multi-wallet clustering"
+/// section: `clustering_harness` found persona-sharing, not timing spread,
+/// is the dominant signal for grouping a fleet's wallets back to one
+/// operator (ARI 0.42 vs 0.08 for a naive tight-timing baseline).
+///
+/// Each agent's own offset is derived deterministically from its own wallet
+/// pubkey (`src/persona.rs`), never a shared/global RNG — see
+/// THREAT_MODEL.md's "No shared entropy across agents" defense, which this
+/// extends rather than weakens: reproducible across restarts, and no two
+/// agents' jitter can be linked through a common random stream.
+///
+/// Unlike `ConsolidationConfig` (opt-in, `enabled = false`, because it moves
+/// real funds) or `supersonic_cast` (opt-in, `weight = 0.0`, because it's a
+/// new external dependency), this feature is pure config-derivation math —
+/// no funds movement, no third-party code path — and the vulnerability it
+/// fixes is otherwise present in `cooker.example.toml`'s defaults out of the
+/// box. So it ships ACTIVE by default, at a small, conservative magnitude
+/// (30 minutes / 15%). An operator who wants the pre-fix
+/// byte-identical-fleet-persona behavior back sets both fields to `0.0`. A
+/// `cooker.toml` predating this block parses fine and gets these same
+/// defaults (see `Default` impl below) — never a hard parse error.
+#[derive(Debug, Deserialize, Clone)]
+pub struct PersonaJitterConfig {
+    /// Max minutes each agent's active_hours window is shifted from the
+    /// operator's configured `[timing].active_hours`. ONE random offset in
+    /// `[-N, N]` is drawn per agent and applied to BOTH boundaries equally,
+    /// so window WIDTH (how many hours/day the agent is "awake") is
+    /// preserved — only where in the day it sits shifts, modeling
+    /// early-bird/night-owl variation among an operator's agents. `0.0`
+    /// disables active-hours jitter entirely.
+    #[serde(default = "default_jitter_active_hours_minutes")]
+    pub active_hours_minutes: f64,
+    /// Max fractional perturbation applied independently to each
+    /// protocol's own weight, e.g. `0.15` = each agent's weight for a given
+    /// protocol is the operator's configured weight times a factor drawn
+    /// independently from `[0.85, 1.15]`. A protocol disabled via
+    /// `weight = 0.0` (e.g. `supersonic_cast`'s default) always stays
+    /// exactly `0.0` — a multiplicative perturbation of zero is zero
+    /// regardless of factor. Weights are NOT rescaled back to the
+    /// operator's exact sum afterward: `ProtocolRegistry::pick_with_rng`
+    /// already normalizes by the current total on every draw, so a global
+    /// rescale would be purely cosmetic (and would silently cancel all
+    /// jitter for a single-protocol registry) — see `src/persona.rs` for
+    /// the full reasoning. `0.0` disables protocol-weight jitter entirely.
+    #[serde(default = "default_jitter_protocol_weight_fraction")]
+    pub protocol_weight_fraction: f64,
+}
+
+impl Default for PersonaJitterConfig {
+    fn default() -> Self {
+        Self {
+            active_hours_minutes: default_jitter_active_hours_minutes(),
+            protocol_weight_fraction: default_jitter_protocol_weight_fraction(),
+        }
+    }
+}
+
 fn default_agent_count() -> usize {
     5
 }
@@ -122,6 +185,12 @@ fn default_min_balance_lamports() -> u64 {
 }
 fn default_reserve_lamports() -> u64 {
     5_000_000
+}
+fn default_jitter_active_hours_minutes() -> f64 {
+    30.0
+}
+fn default_jitter_protocol_weight_fraction() -> f64 {
+    0.15
 }
 
 impl CookerConfig {
@@ -162,6 +231,108 @@ impl CookerConfig {
                 anyhow::bail!("consolidation.fraction_min must be <= fraction_max");
             }
         }
+        if self.persona_jitter.active_hours_minutes < 0.0 {
+            anyhow::bail!("persona_jitter.active_hours_minutes must be >= 0.0");
+        }
+        if !(0.0..=1.0).contains(&self.persona_jitter.protocol_weight_fraction) {
+            anyhow::bail!("persona_jitter.protocol_weight_fraction must be within [0.0, 1.0]");
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Backward-compatibility regression test: a `cooker.toml` written
+    /// before `[persona_jitter]` existed (no such block at all) must still
+    /// parse successfully, and get the documented conservative defaults —
+    /// never a hard parse error. This is the literal shape of the repo's
+    /// own (gitignored) `cooker.toml`, which predates this field.
+    #[test]
+    fn config_without_persona_jitter_block_parses_with_defaults() {
+        let toml_str = r#"
+            rpc_url = "https://api.devnet.solana.com"
+            agent_count = 3
+
+            [timing]
+            mean_interval_minutes = 45.0
+            stddev_interval_minutes = 30.0
+            active_hours = [8, 23]
+            skip_day_probability = 0.15
+
+            [[wallets]]
+            keypair_path = "wallets/agent-01.json"
+            label = "agent-01"
+
+            [[protocols]]
+            name = "jupiter_swap"
+            weight = 3.0
+        "#;
+
+        let cfg: CookerConfig =
+            toml::from_str(toml_str).expect("must parse without persona_jitter");
+        assert_eq!(cfg.persona_jitter.active_hours_minutes, 30.0);
+        assert_eq!(cfg.persona_jitter.protocol_weight_fraction, 0.15);
+    }
+
+    #[test]
+    fn config_can_explicitly_zero_out_persona_jitter() {
+        let toml_str = r#"
+            rpc_url = "https://api.devnet.solana.com"
+
+            [timing]
+            mean_interval_minutes = 45.0
+            stddev_interval_minutes = 30.0
+            active_hours = [8, 23]
+
+            [[wallets]]
+            keypair_path = "wallets/agent-01.json"
+
+            [[protocols]]
+            name = "jupiter_swap"
+
+            [persona_jitter]
+            active_hours_minutes = 0.0
+            protocol_weight_fraction = 0.0
+        "#;
+
+        let cfg: CookerConfig = toml::from_str(toml_str).expect("must parse explicit zero jitter");
+        assert_eq!(cfg.persona_jitter.active_hours_minutes, 0.0);
+        assert_eq!(cfg.persona_jitter.protocol_weight_fraction, 0.0);
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_persona_jitter_fraction() {
+        let mut cfg = CookerConfig {
+            rpc_url: "https://api.devnet.solana.com".to_string(),
+            agent_count: 1,
+            wallets: vec![WalletConfig {
+                keypair_path: "Cargo.toml".to_string(), // any file that exists
+                label: None,
+            }],
+            timing: TimingConfig {
+                mean_interval_minutes: 45.0,
+                stddev_interval_minutes: 30.0,
+                active_hours: [8, 23],
+                skip_day_probability: 0.15,
+            },
+            protocols: vec![ProtocolConfig {
+                name: "jupiter_swap".to_string(),
+                weight: 1.0,
+                params: toml::Table::new(),
+            }],
+            consolidation: ConsolidationConfig::default(),
+            persona_jitter: PersonaJitterConfig::default(),
+        };
+        assert!(cfg.validate().is_ok());
+
+        cfg.persona_jitter.protocol_weight_fraction = 1.5;
+        assert!(cfg.validate().is_err());
+
+        cfg.persona_jitter.protocol_weight_fraction = 0.15;
+        cfg.persona_jitter.active_hours_minutes = -1.0;
+        assert!(cfg.validate().is_err());
     }
 }

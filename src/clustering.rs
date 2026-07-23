@@ -25,6 +25,7 @@ use rand::Rng;
 
 pub const SECS_PER_DAY: u64 = 86_400;
 pub const SECS_PER_HOUR: u64 = 3_600;
+pub const SECS_PER_MINUTE: u64 = 60;
 
 /// One simulated operator's persona — the same shape of config a real
 /// operator would put in `cooker.toml`'s `[timing]` + `[[protocols]]`
@@ -65,6 +66,40 @@ pub fn simulate_wallet(
     actions_target: usize,
     rng: &mut impl Rng,
 ) -> Vec<SimAction> {
+    let active_window_minutes = (
+        operator.timing.active_hours[0] as u32 * 60,
+        operator.timing.active_hours[1] as u32 * 60,
+    );
+    simulate_wallet_with_window(
+        operator,
+        registry,
+        actions_target,
+        active_window_minutes,
+        rng,
+    )
+}
+
+/// Same simulation as `simulate_wallet`, but with the active-hours window
+/// given explicitly in minutes-since-midnight instead of derived from
+/// `operator.timing.active_hours`. Lets a caller (e.g. `clustering_harness`'s
+/// persona-jitter scenario) supply a per-AGENT jittered window — see
+/// `persona::jittered_active_hours_minutes` — instead of the operator's
+/// shared one, while everything else (skip-day roll, protocol choice,
+/// interval sampling) is identical to `simulate_wallet`.
+///
+/// `simulate_wallet` is a thin wrapper around this function using the
+/// operator's own window unmodified, so it is unaffected by this split:
+/// for integer-hour boundaries, `floor(x/60) < 60k` iff `floor(x/3600) < k`
+/// for any non-negative integers `x, k`, so comparing minute-of-day against
+/// an exact hour boundary expressed in minutes gives bit-identical results
+/// to the old hour-granularity comparison.
+pub fn simulate_wallet_with_window(
+    operator: &OperatorConfig,
+    registry: &ProtocolRegistry,
+    actions_target: usize,
+    active_window_minutes: (u32, u32),
+    rng: &mut impl Rng,
+) -> Vec<SimAction> {
     let mut actions = Vec::with_capacity(actions_target);
 
     // Random phase offset: real operators don't all start their fleets at
@@ -74,8 +109,8 @@ pub fn simulate_wallet(
     let mut current_day = clock / SECS_PER_DAY;
     let mut skip_today = rng.gen_bool(operator.timing.skip_day_probability);
 
-    let active_start = operator.timing.active_hours[0] as u64;
-    let active_end = operator.timing.active_hours[1] as u64;
+    let active_start = active_window_minutes.0 as u64;
+    let active_end = active_window_minutes.1 as u64;
 
     // Safety valve for pathological configs (e.g. skip_day_probability
     // near 1.0 combined with a near-zero active window). Never expected to
@@ -96,18 +131,18 @@ pub fn simulate_wallet(
             skip_today = rng.gen_bool(operator.timing.skip_day_probability);
         }
 
-        let hour = (clock % SECS_PER_DAY) / SECS_PER_HOUR;
+        let minute_of_day = (clock % SECS_PER_DAY) / SECS_PER_MINUTE;
 
         if skip_today {
             clock = (current_day + 1) * SECS_PER_DAY;
             continue;
         }
-        if hour < active_start {
-            clock = current_day * SECS_PER_DAY + active_start * SECS_PER_HOUR;
+        if minute_of_day < active_start {
+            clock = current_day * SECS_PER_DAY + active_start * SECS_PER_MINUTE;
             continue;
         }
-        if hour >= active_end {
-            clock = (current_day + 1) * SECS_PER_DAY + active_start * SECS_PER_HOUR;
+        if minute_of_day >= active_end {
+            clock = (current_day + 1) * SECS_PER_DAY + active_start * SECS_PER_MINUTE;
             continue;
         }
 
@@ -644,6 +679,38 @@ mod tests {
             assert!(
                 (8..23).contains(&hour),
                 "action fired outside active hours: {hour}"
+            );
+        }
+    }
+
+    #[test]
+    fn simulate_wallet_with_window_respects_a_non_hour_aligned_jittered_window() {
+        // 8:20am - 10:00am (500..600 minutes-of-day) — deliberately NOT
+        // hour-aligned, exercising the minute-granularity path a jittered
+        // per-agent window actually produces (unlike simulate_wallet's
+        // thin wrapper, which always passes exact hour multiples).
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
+        let operator = OperatorConfig {
+            timing: TimingConfig {
+                mean_interval_minutes: 45.0,
+                stddev_interval_minutes: 30.0,
+                active_hours: [8, 23], // ignored: window is passed explicitly below
+                skip_day_probability: 0.15,
+            },
+            protocols: vec![ProtocolConfig {
+                name: "jupiter_swap".to_string(),
+                weight: 1.0,
+                params: toml::Table::new(),
+            }],
+        };
+        let registry = ProtocolRegistry::from_config(&operator.protocols).unwrap();
+        let actions = simulate_wallet_with_window(&operator, &registry, 20, (500, 600), &mut rng);
+        assert_eq!(actions.len(), 20);
+        for a in &actions {
+            let minute_of_day = (a.timestamp_secs % SECS_PER_DAY) / SECS_PER_MINUTE;
+            assert!(
+                (500..600).contains(&minute_of_day),
+                "action fired outside jittered window: minute {minute_of_day}"
             );
         }
     }

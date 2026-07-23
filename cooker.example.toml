@@ -64,3 +64,33 @@ fraction_min = 0.05
 fraction_max = 0.20
 min_balance_lamports = 10000000
 reserve_lamports = 5000000
+
+# ACTIVE BY DEFAULT (unlike [consolidation] / supersonic_cast above): fixes
+# the "Multi-wallet clustering" gap named in THREAT_MODEL.md — clustering_harness
+# measured that this fleet's shared [timing].active_hours + [[protocols]]
+# weights (every wallet above uses the SAME window and mix) is the dominant
+# signal for grouping wallets back to this operator (ARI 0.42 vs a naive
+# baseline's 0.08). Each agent now derives its OWN active_hours window and
+# protocol weights: the values above stay the FLEET'S base persona, and each
+# wallet's actual behavior is that base nudged by a small, per-agent
+# deterministic offset (derived from the agent's own wallet pubkey — see
+# src/persona.rs — never a shared RNG, so it's reproducible across restarts
+# and uncorrelated between agents).
+#
+# Unlike [consolidation] (moves real funds) or supersonic_cast (new external
+# dependency), this is pure config-derivation math with no funds/third-party
+# risk, and the vulnerability it fixes is otherwise present in THIS file's
+# own defaults — so it ships on. Set both fields to 0.0 to restore the old
+# byte-identical-fleet-persona behavior. See "3c. Multi-wallet clustering" in
+# README.md for the measured before/after numbers.
+[persona_jitter]
+# Max minutes each agent's active_hours window is shifted from the fleet's
+# base window above ([8, 23]). ONE offset in [-30, +30] is drawn per agent
+# and applied to BOTH boundaries equally, so each agent's waking-hours
+# DURATION is unchanged — only where in the day it falls shifts.
+active_hours_minutes = 30.0
+# Max fractional perturbation applied independently to each protocol's own
+# weight above, e.g. 0.15 = an agent's jupiter_swap weight (base 3.0) is
+# drawn from [2.55, 3.45]. A protocol left at weight = 0.0 above
+# (supersonic_cast) always stays exactly 0.0 after jitter.
+protocol_weight_fraction = 0.15

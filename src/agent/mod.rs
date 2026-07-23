@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::{TimingConfig, WalletConfig};
+use crate::config::{PersonaJitterConfig, ProtocolConfig, TimingConfig, WalletConfig};
+use crate::persona;
 use crate::protocols::ProtocolRegistry;
 use crate::state::Checkpoint;
 
@@ -18,10 +19,29 @@ pub struct Agent {
     pub label: String,
     pub wallet: Keypair,
     pub timing: TimingConfig,
+    /// This agent's OWN active-hours window, in minutes-since-midnight —
+    /// the operator's `timing.active_hours` plus a small deterministic
+    /// per-agent offset (see `persona::jittered_active_hours_minutes` and
+    /// `config::PersonaJitterConfig`). Not necessarily identical to
+    /// `timing.active_hours` converted to minutes.
+    pub active_start_minutes: u32,
+    pub active_end_minutes: u32,
+    /// This agent's OWN protocol registry, built from the operator's base
+    /// `[[protocols]]` weights plus a small deterministic per-agent
+    /// perturbation (see `persona::jittered_protocol_weights`). Every agent
+    /// gets its own registry instance now rather than a fleet-shared one,
+    /// since the point of the fix is that the weights themselves differ
+    /// slightly per agent.
+    pub registry: ProtocolRegistry,
 }
 
 impl Agent {
-    pub fn from_config(wallet_cfg: &WalletConfig, timing: TimingConfig) -> anyhow::Result<Self> {
+    pub fn from_config(
+        wallet_cfg: &WalletConfig,
+        timing: TimingConfig,
+        protocols: &[ProtocolConfig],
+        jitter: &PersonaJitterConfig,
+    ) -> anyhow::Result<Self> {
         let wallet = read_keypair_file(&wallet_cfg.keypair_path).map_err(|e| {
             anyhow::anyhow!("failed to load keypair {}: {e}", wallet_cfg.keypair_path)
         })?;
@@ -29,17 +49,48 @@ impl Agent {
             .label
             .clone()
             .unwrap_or_else(|| wallet.pubkey().to_string()[..8].to_string());
+
+        // Public key only (not the full keypair): there's no secrecy
+        // property to protect here, only reproducible-but-uncorrelated
+        // behavioral variation. See `src/persona.rs` module docs.
+        let identity_bytes = wallet.pubkey().to_bytes();
+
+        let (active_start_minutes, active_end_minutes) = persona::jittered_active_hours_minutes(
+            timing.active_hours,
+            jitter.active_hours_minutes,
+            &identity_bytes,
+        );
+
+        let jittered_weights = persona::jittered_protocol_weights(
+            protocols,
+            jitter.protocol_weight_fraction,
+            &identity_bytes,
+        );
+        let agent_protocols: Vec<ProtocolConfig> = protocols
+            .iter()
+            .zip(jittered_weights)
+            .map(|(p, weight)| ProtocolConfig {
+                name: p.name.clone(),
+                weight,
+                params: p.params.clone(),
+            })
+            .collect();
+        let registry = ProtocolRegistry::from_config(&agent_protocols)?;
+
         Ok(Self {
             label,
             wallet,
             timing,
+            active_start_minutes,
+            active_end_minutes,
+            registry,
         })
     }
 
     /// Runs this agent forever: sleeps a human-like, non-deterministic interval,
     /// checks whether it's inside its active hours and hasn't decided to skip
     /// the day, then fires one weighted-random protocol interaction.
-    pub async fn run_forever(self, rpc: Arc<RpcClient>, registry: Arc<ProtocolRegistry>) {
+    pub async fn run_forever(self, rpc: Arc<RpcClient>) {
         let mut skip_today = rand::thread_rng().gen_bool(self.timing.skip_day_probability);
         let mut current_day = Local::now().date_naive();
         let state_dir = PathBuf::from(STATE_DIR);
@@ -81,9 +132,9 @@ impl Agent {
                 }
             }
 
-            let hour = now.hour() as u8;
-            let in_active_window =
-                hour >= self.timing.active_hours[0] && hour < self.timing.active_hours[1];
+            let minute_of_day = now.hour() * 60 + now.minute();
+            let in_active_window = minute_of_day >= self.active_start_minutes
+                && minute_of_day < self.active_end_minutes;
 
             if skip_today || !in_active_window {
                 // Check back at a fraction of the mean interval rather than a
@@ -96,7 +147,7 @@ impl Agent {
             }
 
             let mut last_sig = None;
-            match registry_action(&self, &rpc, &registry).await {
+            match registry_action(&self, &rpc).await {
                 Ok(sig) => {
                     tracing::info!("[{}] action ok, sig={}", self.label, sig);
                     last_sig = Some(sig.to_string());
@@ -137,9 +188,138 @@ impl Agent {
 async fn registry_action(
     agent: &Agent,
     rpc: &RpcClient,
-    registry: &ProtocolRegistry,
 ) -> anyhow::Result<solana_sdk::signature::Signature> {
-    let protocol = registry.pick();
+    let protocol = agent.registry.pick();
     tracing::debug!("[{}] chose protocol: {}", agent.label, protocol.name());
     protocol.execute(rpc, &agent.wallet).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// Writes a fresh in-memory keypair to `dir/name` in the same plain
+    /// JSON-array-of-bytes format `solana-keygen new` / `read_keypair_file`
+    /// use, and returns its path.
+    fn write_keypair(dir: &std::path::Path, name: &str) -> PathBuf {
+        let kp = Keypair::new();
+        let path = dir.join(name);
+        let bytes = kp.to_bytes().to_vec();
+        std::fs::write(&path, serde_json::to_string(&bytes).unwrap()).unwrap();
+        path
+    }
+
+    fn sample_timing() -> TimingConfig {
+        TimingConfig {
+            mean_interval_minutes: 45.0,
+            stddev_interval_minutes: 30.0,
+            active_hours: [8, 23],
+            skip_day_probability: 0.15,
+        }
+    }
+
+    fn sample_protocols() -> Vec<ProtocolConfig> {
+        vec![
+            ProtocolConfig {
+                name: "jupiter_swap".to_string(),
+                weight: 3.0,
+                params: toml::Table::new(),
+            },
+            ProtocolConfig {
+                name: "marinade_stake".to_string(),
+                weight: 1.0,
+                params: toml::Table::new(),
+            },
+        ]
+    }
+
+    fn wallet_config(path: &std::path::Path) -> WalletConfig {
+        WalletConfig {
+            keypair_path: path.to_str().unwrap().to_string(),
+            label: None,
+        }
+    }
+
+    #[test]
+    fn two_agents_same_operator_get_different_jittered_active_hours() {
+        let dir = tempdir().unwrap();
+        let path_a = write_keypair(dir.path(), "a.json");
+        let path_b = write_keypair(dir.path(), "b.json");
+
+        let jitter = PersonaJitterConfig::default();
+        let agent_a = Agent::from_config(
+            &wallet_config(&path_a),
+            sample_timing(),
+            &sample_protocols(),
+            &jitter,
+        )
+        .unwrap();
+        let agent_b = Agent::from_config(
+            &wallet_config(&path_b),
+            sample_timing(),
+            &sample_protocols(),
+            &jitter,
+        )
+        .unwrap();
+
+        assert_ne!(
+            (agent_a.active_start_minutes, agent_a.active_end_minutes),
+            (agent_b.active_start_minutes, agent_b.active_end_minutes),
+            "two different wallets under the same operator config should get \
+             slightly different persona jitter, not share the exact same window"
+        );
+
+        let bound = jitter.active_hours_minutes.round() as i64;
+        for agent in [&agent_a, &agent_b] {
+            assert!((agent.active_start_minutes as i64 - 8 * 60).abs() <= bound);
+            assert!((agent.active_end_minutes as i64 - 23 * 60).abs() <= bound);
+        }
+    }
+
+    #[test]
+    fn zero_jitter_config_reproduces_operator_active_hours_exactly() {
+        let dir = tempdir().unwrap();
+        let path_a = write_keypair(dir.path(), "a.json");
+
+        let jitter = PersonaJitterConfig {
+            active_hours_minutes: 0.0,
+            protocol_weight_fraction: 0.0,
+        };
+        let agent = Agent::from_config(
+            &wallet_config(&path_a),
+            sample_timing(),
+            &sample_protocols(),
+            &jitter,
+        )
+        .unwrap();
+
+        assert_eq!(agent.active_start_minutes, 8 * 60);
+        assert_eq!(agent.active_end_minutes, 23 * 60);
+    }
+
+    #[test]
+    fn same_wallet_gives_identical_jitter_across_separate_constructions() {
+        let dir = tempdir().unwrap();
+        let path_a = write_keypair(dir.path(), "a.json");
+        let jitter = PersonaJitterConfig::default();
+
+        let agent_1 = Agent::from_config(
+            &wallet_config(&path_a),
+            sample_timing(),
+            &sample_protocols(),
+            &jitter,
+        )
+        .unwrap();
+        let agent_2 = Agent::from_config(
+            &wallet_config(&path_a),
+            sample_timing(),
+            &sample_protocols(),
+            &jitter,
+        )
+        .unwrap();
+
+        assert_eq!(agent_1.active_start_minutes, agent_2.active_start_minutes);
+        assert_eq!(agent_1.active_end_minutes, agent_2.active_end_minutes);
+    }
 }

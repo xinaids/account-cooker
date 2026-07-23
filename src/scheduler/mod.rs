@@ -5,16 +5,17 @@ use std::sync::Arc;
 use crate::agent::Agent;
 use crate::config::CookerConfig;
 use crate::consolidation::{self, FleetWallet};
-use crate::protocols::ProtocolRegistry;
 
 /// Spawns one independent async task per wallet, each running its own agent
-/// loop with its own randomized timing. This is what lets the fleet scale to
-/// thousands of agents: they share nothing but the RPC client and registry.
+/// loop with its own randomized timing AND (see `PersonaJitterConfig`) its
+/// own slightly-jittered active-hours window and protocol registry. This is
+/// what lets the fleet scale to thousands of agents: they share nothing but
+/// the RPC client — not even a registry anymore, now that each agent's
+/// weights are its own.
 pub async fn run_fleet(cfg: CookerConfig, agent_override: Option<usize>) -> anyhow::Result<()> {
     cfg.validate()?;
 
     let rpc = Arc::new(RpcClient::new(cfg.rpc_url.clone()));
-    let registry = Arc::new(ProtocolRegistry::from_config(&cfg.protocols)?);
 
     let wallet_count = agent_override
         .unwrap_or(cfg.agent_count)
@@ -22,19 +23,23 @@ pub async fn run_fleet(cfg: CookerConfig, agent_override: Option<usize>) -> anyh
     tracing::info!(
         "starting fleet: {} agent(s), {} protocol(s), rpc={}",
         wallet_count,
-        registry.len(),
+        cfg.protocols.len(),
         cfg.rpc_url
     );
 
     let mut handles = Vec::with_capacity(wallet_count);
 
     for wallet_cfg in cfg.wallets.iter().take(wallet_count) {
-        let agent = Agent::from_config(wallet_cfg, cfg.timing.clone())?;
+        let agent = Agent::from_config(
+            wallet_cfg,
+            cfg.timing.clone(),
+            &cfg.protocols,
+            &cfg.persona_jitter,
+        )?;
         let rpc = Arc::clone(&rpc);
-        let registry = Arc::clone(&registry);
 
         handles.push(tokio::spawn(async move {
-            agent.run_forever(rpc, registry).await;
+            agent.run_forever(rpc).await;
         }));
     }
 
