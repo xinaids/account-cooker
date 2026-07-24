@@ -33,6 +33,15 @@ pub struct Agent {
     /// since the point of the fix is that the weights themselves differ
     /// slightly per agent.
     pub registry: ProtocolRegistry,
+    /// This agent's OWN daily skip probability — the operator's
+    /// `timing.skip_day_probability` plus a small deterministic per-agent
+    /// multiplicative perturbation (see
+    /// `persona::jittered_skip_day_probability`). Closes the residual
+    /// clustering signal named in README.md's "3d.": `actions_per_day`
+    /// stayed separable across the active-hours/protocol-weight jitter
+    /// sweep specifically because every agent in a fleet still shared this
+    /// one value exactly.
+    pub skip_day_probability: f64,
 }
 
 impl Agent {
@@ -77,6 +86,12 @@ impl Agent {
             .collect();
         let registry = ProtocolRegistry::from_config(&agent_protocols)?;
 
+        let skip_day_probability = persona::jittered_skip_day_probability(
+            timing.skip_day_probability,
+            jitter.skip_day_probability_fraction,
+            &identity_bytes,
+        );
+
         Ok(Self {
             label,
             wallet,
@@ -84,6 +99,7 @@ impl Agent {
             active_start_minutes,
             active_end_minutes,
             registry,
+            skip_day_probability,
         })
     }
 
@@ -91,7 +107,7 @@ impl Agent {
     /// checks whether it's inside its active hours and hasn't decided to skip
     /// the day, then fires one weighted-random protocol interaction.
     pub async fn run_forever(self, rpc: Arc<RpcClient>) {
-        let mut skip_today = rand::thread_rng().gen_bool(self.timing.skip_day_probability);
+        let mut skip_today = rand::thread_rng().gen_bool(self.skip_day_probability);
         let mut current_day = Local::now().date_naive();
         let state_dir = PathBuf::from(STATE_DIR);
         let mut action_count = 0u64;
@@ -126,7 +142,7 @@ impl Agent {
             let now = Local::now();
             if now.date_naive() != current_day {
                 current_day = now.date_naive();
-                skip_today = rand::thread_rng().gen_bool(self.timing.skip_day_probability);
+                skip_today = rand::thread_rng().gen_bool(self.skip_day_probability);
                 if skip_today {
                     tracing::info!("[{}] sitting out today (simulated absence)", self.label);
                 }
@@ -278,6 +294,44 @@ mod tests {
     }
 
     #[test]
+    fn two_agents_same_operator_get_different_jittered_skip_day_probability() {
+        let dir = tempdir().unwrap();
+        let path_a = write_keypair(dir.path(), "a.json");
+        let path_b = write_keypair(dir.path(), "b.json");
+
+        let jitter = PersonaJitterConfig::default();
+        let agent_a = Agent::from_config(
+            &wallet_config(&path_a),
+            sample_timing(),
+            &sample_protocols(),
+            &jitter,
+        )
+        .unwrap();
+        let agent_b = Agent::from_config(
+            &wallet_config(&path_b),
+            sample_timing(),
+            &sample_protocols(),
+            &jitter,
+        )
+        .unwrap();
+
+        assert_ne!(
+            agent_a.skip_day_probability, agent_b.skip_day_probability,
+            "two different wallets under the same operator config should get \
+             slightly different skip-day jitter, not share the exact same probability"
+        );
+
+        let base = sample_timing().skip_day_probability;
+        let fraction = jitter.skip_day_probability_fraction;
+        for agent in [&agent_a, &agent_b] {
+            assert!((0.0..=1.0).contains(&agent.skip_day_probability));
+            let lo = base * (1.0 - fraction) - 1e-9;
+            let hi = base * (1.0 + fraction) + 1e-9;
+            assert!((lo..=hi).contains(&agent.skip_day_probability));
+        }
+    }
+
+    #[test]
     fn zero_jitter_config_reproduces_operator_active_hours_exactly() {
         let dir = tempdir().unwrap();
         let path_a = write_keypair(dir.path(), "a.json");
@@ -285,6 +339,7 @@ mod tests {
         let jitter = PersonaJitterConfig {
             active_hours_minutes: 0.0,
             protocol_weight_fraction: 0.0,
+            skip_day_probability_fraction: 0.0,
         };
         let agent = Agent::from_config(
             &wallet_config(&path_a),
@@ -296,6 +351,10 @@ mod tests {
 
         assert_eq!(agent.active_start_minutes, 8 * 60);
         assert_eq!(agent.active_end_minutes, 23 * 60);
+        assert_eq!(
+            agent.skip_day_probability,
+            sample_timing().skip_day_probability
+        );
     }
 
     #[test]
@@ -321,5 +380,6 @@ mod tests {
 
         assert_eq!(agent_1.active_start_minutes, agent_2.active_start_minutes);
         assert_eq!(agent_1.active_end_minutes, agent_2.active_end_minutes);
+        assert_eq!(agent_1.skip_day_probability, agent_2.skip_day_probability);
     }
 }

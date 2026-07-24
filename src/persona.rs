@@ -8,8 +8,15 @@
 //! tight-timing baseline's 0.08; see THREAT_MODEL.md's "Multi-wallet
 //! clustering"). This module is the named-but-not-yet-implemented
 //! recommendation from that section: each agent derives its OWN active-hours
-//! window and protocol weights from the operator's base persona, nudged by a
-//! small perturbation.
+//! window, protocol weights, and daily skip probability from the operator's
+//! base persona, nudged by a small perturbation. The third of those
+//! (`jittered_skip_day_probability`) closes a specific residual signal
+//! README.md's "3d." found AFTER the first two shipped: `actions_per_day`
+//! (driven partly by `skip_day_probability`, which `build_operator`'s
+//! `Diverse` persona randomizes per OPERATOR but nothing jittered per AGENT)
+//! held roughly steady at 1.6-2.9 separability across the entire
+//! active-hours/protocol-weight jitter sweep — this function is that
+//! missing per-agent jitter.
 //!
 //! The perturbation is derived deterministically from each agent's own
 //! wallet pubkey (`persona_seed` below), never a shared/global RNG —
@@ -35,6 +42,7 @@ use sha2::{Digest, Sha256};
 
 const DOMAIN_ACTIVE_HOURS: &[u8] = b"account-cooker/persona-jitter/active-hours/v1";
 const DOMAIN_PROTOCOL_WEIGHTS: &[u8] = b"account-cooker/persona-jitter/protocol-weights/v1";
+const DOMAIN_SKIP_DAY: &[u8] = b"account-cooker/persona-jitter/skip-day/v1";
 
 const MINUTES_PER_DAY: i64 = 24 * 60;
 
@@ -156,6 +164,42 @@ pub fn jittered_protocol_weights(
         .collect()
 }
 
+/// Derives one agent's own daily skip probability from the operator's base
+/// `[timing].skip_day_probability`: the base probability perturbed by a
+/// factor drawn independently from `[1 - jitter_fraction, 1 + jitter_fraction]`
+/// — the same multiplicative-perturbation shape as `jittered_protocol_weights`,
+/// applied to a single scalar instead of a vector.
+///
+/// Clamped to `[0.0, 1.0]` after perturbation. This is the one genuinely new
+/// piece of range-handling relative to this module's other two functions: a
+/// protocol weight has no natural upper bound (only `jittered_protocol_weights`'s
+/// `.max(0.0)` floor), but a probability cannot legitimately exceed `1.0`
+/// either. An operator configured near either end of the valid range (e.g.
+/// `skip_day_probability = 0.95`) combined with a large jitter fraction could
+/// otherwise push the perturbed value outside `[0.0, 1.0]` — which
+/// `rand::Rng::gen_bool` (the real consumer, in `Agent::run_forever`) panics
+/// on.
+///
+/// `jitter_fraction <= 0.0` disables jitter entirely and returns the
+/// operator's exact base probability — the pre-fix behavior, and also what a
+/// `cooker.toml` predating this field's introduction to `PersonaJitterConfig`
+/// gets by default (backward-compatible, matching the other two functions in
+/// this module).
+pub fn jittered_skip_day_probability(
+    base_probability: f64,
+    jitter_fraction: f64,
+    identity_bytes: &[u8],
+) -> f64 {
+    if jitter_fraction <= 0.0 {
+        return base_probability;
+    }
+
+    let mut rng = ChaCha8Rng::seed_from_u64(persona_seed(identity_bytes, DOMAIN_SKIP_DAY));
+    let fraction = jitter_fraction.min(1.0);
+    let factor = rng.gen_range((1.0 - fraction)..=(1.0 + fraction));
+    (base_probability * factor).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +234,11 @@ mod tests {
     }
 
     #[test]
+    fn zero_jitter_reproduces_base_skip_day_probability_exactly() {
+        assert_eq!(jittered_skip_day_probability(0.15, 0.0, b"any-agent"), 0.15);
+    }
+
+    #[test]
     fn same_identity_gives_identical_jitter_on_every_call() {
         let a1 = jittered_active_hours_minutes([8, 23], 30.0, b"wallet-fixed-bytes");
         let a2 = jittered_active_hours_minutes([8, 23], 30.0, b"wallet-fixed-bytes");
@@ -204,6 +253,13 @@ mod tests {
         assert_eq!(
             w1, w2,
             "same wallet identity must derive the same weights every time"
+        );
+
+        let p1 = jittered_skip_day_probability(0.15, 0.15, b"wallet-fixed-bytes");
+        let p2 = jittered_skip_day_probability(0.15, 0.15, b"wallet-fixed-bytes");
+        assert_eq!(
+            p1, p2,
+            "same wallet identity must derive the same skip-day probability every time"
         );
     }
 
@@ -223,6 +279,17 @@ mod tests {
         let base = protocols(&[3.0, 1.0, 1.0]);
         let a = jittered_protocol_weights(&base, 0.15, b"agent-aaaa");
         let b = jittered_protocol_weights(&base, 0.15, b"agent-bbbb");
+        assert_ne!(
+            a, b,
+            "two different agent identities under the same operator config \
+             should not collide on jitter"
+        );
+    }
+
+    #[test]
+    fn different_identities_get_different_skip_day_probability() {
+        let a = jittered_skip_day_probability(0.15, 0.15, b"agent-aaaa");
+        let b = jittered_skip_day_probability(0.15, 0.15, b"agent-bbbb");
         assert_ne!(
             a, b,
             "two different agent identities under the same operator config \
@@ -364,5 +431,67 @@ mod tests {
             (mean_factor - 1.0).abs() < 0.02,
             "expected near-unbiased mean perturbation factor, got {mean_factor}"
         );
+    }
+
+    #[test]
+    fn skip_day_probability_jitter_stays_within_configured_multiplicative_bound() {
+        let base_probability = 0.15;
+        for i in 0..500u32 {
+            let identity = i.to_le_bytes();
+            let out = jittered_skip_day_probability(base_probability, 0.15, &identity);
+            let lo = base_probability * 0.85 - 1e-9;
+            let hi = base_probability * 1.15 + 1e-9;
+            assert!(
+                (lo..=hi).contains(&out),
+                "jittered skip-day probability {out} outside [{lo}, {hi}] for base {base_probability}"
+            );
+        }
+    }
+
+    /// Regression test for systematic bias in skip-day jitter, mirroring the
+    /// active-hours mean-offset and protocol-weight mean-factor tests above.
+    /// Uses a base probability (0.15) with enough headroom on both sides
+    /// that `[0.0, 1.0]` clamping never triggers at this jitter fraction
+    /// (0.15 * [0.85, 1.15] = [0.1275, 0.1725], nowhere near either bound) —
+    /// otherwise the clamp itself would bias the mean and this test would be
+    /// checking clamp behavior instead of perturbation bias. Standard error
+    /// of the mean at n=5000 for this distribution is ~0.00018; 0.005 is a
+    /// 25-sigma-plus tolerance — generous enough to never flake, tight
+    /// enough to catch a real bug (e.g. a sign error making every agent
+    /// skew the same direction).
+    #[test]
+    fn skip_day_probability_jitter_mean_is_near_base_across_many_agents() {
+        let base_probability = 0.15;
+        let n = 5000u64;
+        let mut total = 0.0;
+        for i in 0..n {
+            let identity = i.to_le_bytes();
+            total += jittered_skip_day_probability(base_probability, 0.15, &identity);
+        }
+        let mean = total / n as f64;
+        assert!(
+            (mean - base_probability).abs() < 0.005,
+            "expected near-unbiased mean around base probability {base_probability}, got {mean}"
+        );
+    }
+
+    /// Regression test for the one piece of range-handling this function
+    /// adds beyond its two siblings: output must never leave `[0.0, 1.0]`,
+    /// even for base probabilities near either boundary combined with a
+    /// large jitter fraction (the case that would otherwise make
+    /// `rand::Rng::gen_bool` panic in `Agent::run_forever`).
+    #[test]
+    fn skip_day_probability_jitter_never_escapes_valid_probability_range() {
+        let cases = [(0.95, 0.5), (0.02, 1.0), (1.0, 1.0), (0.0, 1.0)];
+        for (base, fraction) in cases {
+            for i in 0..200u32 {
+                let identity = i.to_le_bytes();
+                let out = jittered_skip_day_probability(base, fraction, &identity);
+                assert!(
+                    (0.0..=1.0).contains(&out),
+                    "jittered skip-day probability {out} outside [0.0, 1.0] for base={base} fraction={fraction}"
+                );
+            }
+        }
     }
 }

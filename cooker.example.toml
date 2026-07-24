@@ -70,19 +70,23 @@ reserve_lamports = 5000000
 # measured that this fleet's shared [timing].active_hours + [[protocols]]
 # weights (every wallet above uses the SAME window and mix) is the dominant
 # signal for grouping wallets back to this operator (ARI 0.42 vs a naive
-# baseline's 0.08). Each agent now derives its OWN active_hours window and
-# protocol weights: the values above stay the FLEET'S base persona, and each
-# wallet's actual behavior is that base nudged by a small, per-agent
-# deterministic offset (derived from the agent's own wallet pubkey — see
-# src/persona.rs — never a shared RNG, so it's reproducible across restarts
-# and uncorrelated between agents).
+# baseline's 0.08). Each agent now derives its OWN active_hours window,
+# protocol weights, and daily skip probability: the values above stay the
+# FLEET'S base persona, and each wallet's actual behavior is that base
+# nudged by a small, per-agent deterministic offset (derived from the
+# agent's own wallet pubkey — see src/persona.rs — never a shared RNG, so
+# it's reproducible across restarts and uncorrelated between agents).
 #
 # Unlike [consolidation] (moves real funds) or supersonic_cast (new external
 # dependency), this is pure config-derivation math with no funds/third-party
 # risk, and the vulnerability it fixes is otherwise present in THIS file's
-# own defaults — so it ships on. Set both fields to 0.0 to restore the old
-# byte-identical-fleet-persona behavior. See "3c. Multi-wallet clustering" in
-# README.md for the measured before/after numbers.
+# own defaults — so it ships on. Set all three fields to 0.0 to restore the
+# old byte-identical-fleet-persona behavior. See "3c."/"3d." in README.md
+# for the active_hours/protocol_weight measured before/after numbers — and
+# "3e." for skip_day_probability_fraction below, which is shipped on for
+# consistency with its two siblings but was MEASURED to have no significant
+# additional clustering-resistance effect at any tested magnitude (an
+# honest null result, not hidden).
 [persona_jitter]
 # Max minutes each agent's active_hours window is shifted from the fleet's
 # base window above ([8, 23]). ONE offset in [-30, +30] is drawn per agent
@@ -94,3 +98,10 @@ active_hours_minutes = 30.0
 # drawn from [2.55, 3.45]. A protocol left at weight = 0.0 above
 # (supersonic_cast) always stays exactly 0.0 after jitter.
 protocol_weight_fraction = 0.15
+# Max fractional perturbation applied to each agent's own daily skip
+# probability, e.g. 0.15 = an agent's actual skip_day_probability (base
+# 0.15 above) is drawn from [0.1275, 0.1725], clamped to [0.0, 1.0]. See
+# README.md's "3e." before tuning this one: measured to have no significant
+# effect on clustering resistance across its entire valid range (0.0-1.0),
+# unlike the two fields above.
+skip_day_probability_fraction = 0.15

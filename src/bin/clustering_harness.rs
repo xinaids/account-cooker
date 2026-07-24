@@ -10,7 +10,7 @@
 //! `timing::sample_interval_secs` and `protocols::ProtocolRegistry::pick_with_rng`
 //! — not a reimplementation, so this measures what actually ships.
 //!
-//! ## Two independent axes, five named scenarios — plus a sixth, the fix
+//! ## Two independent axes, five named scenarios — plus two more, the fix and its residual
 //!
 //! An operator persona has two things that can vary: how WIDE its
 //! intra-operator timing spread is (tight/naive vs account-cooker's real
@@ -58,7 +58,25 @@
 //!   magnitude, the same defaults `cooker.example.toml` ships. Because
 //!   operator generation is held identical between this row and the one
 //!   above, any ARI/NMI difference between them isolates the effect of
-//!   per-agent persona jitter alone.
+//!   per-agent persona jitter alone. `skip_day_probability_fraction` is
+//!   fixed at `0.0` for THIS scenario specifically (not the CLI default),
+//!   so this row stays byte-identical to the already-shipped/documented
+//!   POST-fix numbers regardless of the 7th scenario added below.
+//! - **`wide_timing + diverse_persona + agent_jitter + skip_day_jitter`
+//!   (POST-fix, skip-day residual)** — same operator-level generation again
+//!   (same `build_operator` call as the two rows above), same
+//!   active_hours/protocol-weight jitter as the POST-fix row, PLUS each
+//!   agent now also derives its own daily skip probability via
+//!   `persona::jittered_skip_day_probability` at
+//!   `PersonaJitterConfig::default()`'s magnitude. This targets the
+//!   residual signal README.md's "3d." found after shipping the first two
+//!   jitters alone: `actions_per_day` (driven partly by
+//!   `skip_day_probability`, randomized per OPERATOR by `Diverse` but not
+//!   per AGENT) held roughly steady at 1.6-2.9 separability across that
+//!   entire sweep. Comparing this row against the POST-fix row above
+//!   isolates skip-day jitter's effect alone, the same way the POST-fix row
+//!   isolates active-hours/protocol-weight jitter's effect against the
+//!   PRE-fix row.
 //!
 //! Splitting the axes this way exists because the first version of this
 //! harness compared only `tight_timing+shared_persona` (naive) against
@@ -138,8 +156,8 @@ struct Args {
     kmeans_restarts: usize,
     #[arg(long, default_value_t = 1)]
     seed: u64,
-    /// Persona-jitter magnitude used by the POST-fix scenario only —
-    /// defaults to exactly `PersonaJitterConfig::default()`, the same
+    /// Persona-jitter magnitude used by both POST-fix scenarios (6th and
+    /// 7th) — defaults to exactly `PersonaJitterConfig::default()`, the same
     /// value `cooker.example.toml` ships, so the default invocation
     /// measures the real shipped fix. Overridable here so the
     /// magnitude-vs-believability tradeoff can be explored without editing
@@ -148,6 +166,12 @@ struct Args {
     jitter_active_hours_minutes: f64,
     #[arg(long, default_value_t = PersonaJitterConfig::default().protocol_weight_fraction)]
     jitter_protocol_weight_fraction: f64,
+    /// Skip-day-probability jitter magnitude used by the 7th scenario
+    /// (`RealConfigPostFixWithSkipDayJitter`) only — defaults to exactly
+    /// `PersonaJitterConfig::default()`, the same value `cooker.example.toml`
+    /// ships, so the default invocation measures the real shipped fix.
+    #[arg(long, default_value_t = PersonaJitterConfig::default().skip_day_probability_fraction)]
+    jitter_skip_day_probability_fraction: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -185,8 +209,23 @@ enum Scenario {
     /// ONLY difference is that each agent's active_hours/protocol weights
     /// are no longer the operator's exact values, so this scenario isolates
     /// the fix's effect rather than conflating it with a change in
-    /// operator-level diversity.
+    /// operator-level diversity. Skip-day jitter is explicitly held at
+    /// `0.0` for this scenario (see `agent_jitter`) so it stays
+    /// byte-identical to the numbers already documented in README.md/
+    /// THREAT_MODEL.md, regardless of the scenario below.
     RealConfigPostFix,
+    /// Same as `RealConfigPostFix`, PLUS each agent also derives its own
+    /// daily skip probability via `persona::jittered_skip_day_probability`
+    /// at `PersonaJitterConfig`'s default magnitude (CLI-overridable via
+    /// `--jitter-skip-day-probability-fraction`). Targets the residual
+    /// signal named in README.md's "3d.": `actions_per_day` held roughly
+    /// steady at 1.6-2.9 separability across the active-hours/protocol-weight
+    /// jitter sweep because `skip_day_probability` was randomized per
+    /// OPERATOR but never jittered per AGENT. Operator generation is
+    /// byte-identical to `RealConfigPostFix` (see `build_operators`), so any
+    /// ARI/NMI difference between the two isolates skip-day jitter's effect
+    /// alone.
+    RealConfigPostFixWithSkipDayJitter,
 }
 
 impl Scenario {
@@ -206,19 +245,33 @@ impl Scenario {
             Scenario::RealConfigPostFix => {
                 "wide_timing + diverse_persona + agent_jitter (POST-fix, default jitter)"
             }
+            Scenario::RealConfigPostFixWithSkipDayJitter => {
+                "wide_timing + diverse_persona + agent_jitter + skip_day_jitter (POST-fix, skip-day residual)"
+            }
         }
     }
 
-    /// `Some(jitter config)` for the post-fix scenario, taken from `args`
-    /// (CLI-overridable, defaults to `PersonaJitterConfig::default()` —
-    /// see `Args`); `None` for every other scenario, meaning every agent
+    /// `Some(jitter config)` for the two post-fix scenarios, taken from
+    /// `args` (CLI-overridable, defaults to `PersonaJitterConfig::default()`
+    /// — see `Args`); `None` for every other scenario, meaning every agent
     /// within one operator shares that operator's exact persona — the
     /// pre-fix / naive-baseline behavior those scenarios exist to model.
+    ///
+    /// `RealConfigPostFix` explicitly zeroes `skip_day_probability_fraction`
+    /// regardless of the CLI default, so adding the skip-day-jitter
+    /// scenario below can never silently change that row's already-shipped,
+    /// already-documented numbers.
     fn agent_jitter(&self, args: &Args) -> Option<PersonaJitterConfig> {
         match self {
             Scenario::RealConfigPostFix => Some(PersonaJitterConfig {
                 active_hours_minutes: args.jitter_active_hours_minutes,
                 protocol_weight_fraction: args.jitter_protocol_weight_fraction,
+                skip_day_probability_fraction: 0.0,
+            }),
+            Scenario::RealConfigPostFixWithSkipDayJitter => Some(PersonaJitterConfig {
+                active_hours_minutes: args.jitter_active_hours_minutes,
+                protocol_weight_fraction: args.jitter_protocol_weight_fraction,
+                skip_day_probability_fraction: args.jitter_skip_day_probability_fraction,
             }),
             _ => None,
         }
@@ -304,9 +357,9 @@ fn build_operators(
             },
             Scenario::Combo(spread, persona) => build_operator(spread, persona, rng),
             // Same operator-persona generation as Combo(Wide, Diverse) —
-            // deliberately, so the two scenarios are only ever compared on
-            // the one axis that differs between them (per-agent jitter).
-            Scenario::RealConfigPostFix => {
+            // deliberately, so these scenarios are only ever compared on
+            // the axis that differs between them (per-agent jitter).
+            Scenario::RealConfigPostFix | Scenario::RealConfigPostFixWithSkipDayJitter => {
                 build_operator(TimingSpread::Wide, Persona::Diverse, rng)
             }
         })
@@ -327,12 +380,12 @@ struct TrialData {
 /// Exactly ONE `rng.gen()` draw is made per agent regardless of scenario
 /// (`agent_seed` below) — whether that seed is used ONLY to seed the
 /// wallet's own action-generation RNG (every scenario except the post-fix
-/// one) or ALSO fed through `persona::jittered_*` (post-fix scenario only)
+/// ones) or ALSO fed through `persona::jittered_*` (post-fix scenarios only)
 /// doesn't change how many values are drawn from the shared trial `rng`,
 /// since `persona::` re-hashes the seed through SHA-256 and spins up its
 /// own fresh `ChaCha8Rng` rather than drawing further from `rng`. This is
-/// what keeps the pre-existing 5 scenarios' numbers bit-for-bit unchanged
-/// by this function's extension to support a 6th.
+/// what keeps the pre-existing scenarios' numbers bit-for-bit unchanged by
+/// this function's extensions to support new ones (5 -> 6 -> 7).
 fn simulate_trial(scenario: Scenario, args: &Args, seed: u64) -> TrialData {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let operators = build_operators(scenario, args.operators, &mut rng);
@@ -359,6 +412,7 @@ fn simulate_trial(scenario: Scenario, args: &Args, seed: u64) -> TrialData {
                     &base_registry,
                     args.actions_per_wallet,
                     base_window,
+                    operator.timing.skip_day_probability,
                     &mut agent_rng,
                 ),
                 Some(j) => {
@@ -394,11 +448,18 @@ fn simulate_trial(scenario: Scenario, args: &Args, seed: u64) -> TrialData {
                         &identity_bytes,
                     );
 
+                    let agent_skip_day_probability = persona::jittered_skip_day_probability(
+                        operator.timing.skip_day_probability,
+                        j.skip_day_probability_fraction,
+                        &identity_bytes,
+                    );
+
                     simulate_wallet_with_window(
                         operator,
                         &agent_registry,
                         args.actions_per_wallet,
                         agent_window,
+                        agent_skip_day_probability,
                         &mut agent_rng,
                     )
                 }
@@ -483,6 +544,7 @@ fn main() {
         Scenario::Combo(TimingSpread::Wide, Persona::Shared),
         Scenario::Combo(TimingSpread::Wide, Persona::Diverse),
         Scenario::RealConfigPostFix,
+        Scenario::RealConfigPostFixWithSkipDayJitter,
     ];
 
     println!("| Scenario | ARI (mean ± std) | NMI (mean ± std) | ARI range | NMI range |");
@@ -582,5 +644,16 @@ fn main() {
         file), so any ARI/NMI difference isolates the effect of per-agent \
         persona jitter (src/persona.rs) alone, not a change in how operators \
         themselves are generated."
+    );
+    println!(
+        "Skip-day-jitter residual check: compare the '... + agent_jitter \
+        (POST-fix ...)' row against '... + skip_day_jitter (POST-fix, \
+        skip-day residual)' above. Operator-level generation is identical \
+        between the two as well (same build_operator call — see \
+        build_operators), and the first two jitter magnitudes are also held \
+        equal (see agent_jitter), so any ARI/NMI difference isolates the \
+        effect of per-agent skip-day-probability jitter alone — the residual \
+        signal named in README.md's \"3d.\" (actions_per_day, driven partly \
+        by skip_day_probability)."
     );
 }

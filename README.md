@@ -236,6 +236,15 @@ only, not an adversary with on-chain funding-graph metadata — see
 "Out of scope" there). This harness is additional to `timing_harness`, not a
 replacement for it.
 
+**Note on comparability with `account-cooker` PR #2 (marcelofeitoza).** That
+PR reports its own ARI/NMI numbers for a "persona/session" config using a
+different clustering method (connected-components at a fixed similarity
+threshold) than this harness's from-scratch k-means. We reviewed that PR as
+a reference point while shaping this harness's own rigor — credit where
+due — but the two numbers come from different procedures measuring
+different things, and shouldn't be read as directly comparable to each
+other.
+
 ### 3d. Per-agent persona jitter — the fix, measured
 
 "3c." diagnosed *why* the real config clusters more easily than a naive bot
@@ -312,8 +321,10 @@ character — and ARI is still 0.166, roughly double the naive baseline.
 `build_operator`'s `Diverse` persona randomizes *per operator* but this fix
 does not jitter *per agent*) holds roughly steady at 1.6-2.9 separability
 across the entire sweep — an un-jittered residual signal that puts a floor
-under how low ARI can go from this fix alone. Closing that residual is
-un-scoped future work (see Roadmap), not solved here.
+under how low ARI can go from this fix alone. Closing that residual was
+attempted in a later session — see "3e." below for what happened when
+`skip_day_probability` was actually jittered per agent (short version: it
+didn't move the floor).
 
 **Conclusion, stated plainly**: the fix is real, measured, free (pure
 config-derivation math, no funds/third-party risk — see
@@ -322,6 +333,124 @@ it is honestly a partial mitigation of "3c."'s finding, not a resolution of
 it. The conservative shipped default is a deliberate choice: the sweep above
 shows that closing more of the gap costs individual-agent believability
 faster than it buys clustering resistance.
+
+### 3e. Skip-day-probability jitter — measured, and it doesn't move the needle
+
+"3d." named the residual directly: `actions_per_day` (driven partly by
+`skip_day_probability`, which `build_operator`'s `Diverse` persona
+randomizes *per operator* but the active-hours/protocol-weight fix left
+un-jittered *per agent*) held steady at 1.6-2.9 separability across that
+fix's entire sensitivity sweep — a floor active-hours/protocol-weight
+jitter alone couldn't touch. `src/persona.rs::jittered_skip_day_probability`
+closes that specific gap the same way the other two functions do: each
+agent's own daily skip probability is the operator's base value times an
+independent multiplicative factor drawn from
+`[1 - jitter_fraction, 1 + jitter_fraction]`, clamped to `[0.0, 1.0]` (a
+probability, unlike a protocol weight, cannot exceed `1.0`), derived
+deterministically from the agent's own wallet pubkey (SHA-256,
+domain-separated, new `DOMAIN_SKIP_DAY` tag). `cooker.example.toml`'s
+`[persona_jitter]` block now ships a third field,
+`skip_day_probability_fraction = 0.15`, matching `protocol_weight_fraction`'s
+own conservative default.
+
+A seventh `clustering_harness` scenario, `wide_timing + diverse_persona +
+agent_jitter + skip_day_jitter`, measures it directly. Operator-level
+generation and the first two jitter magnitudes are held byte-identical to
+the sixth (POST-fix) row — see `src/bin/clustering_harness.rs`'s
+`agent_jitter` — so any difference isolates skip-day jitter's own effect:
+
+```
+cargo run --release --bin clustering_harness -- --seed 1
+```
+
+| Scenario | ARI (mean ± std, 50 trials) | NMI (mean ± std, 50 trials) |
+|---|---|---|
+| `wide_timing` + `diverse_persona` + `agent_jitter` (POST-fix, from "3d.") | 0.4140 ± 0.1046 | 0.6076 ± 0.0894 |
+| `wide_timing` + `diverse_persona` + `agent_jitter` + `skip_day_jitter` (this fix, shipped default) | 0.4142 ± 0.1056 | 0.6050 ± 0.0937 |
+
+**Honest result: no measurable effect, reported as measured rather than
+reshaped to look like progress.** ARI moves from 0.4140 to 0.4142 — an
+*increase* of 0.0002, i.e. statistical noise, not an improvement — and NMI
+moves 0.6076 -> 0.6050, also well inside one trial-to-trial standard
+deviation (±0.09-0.11). This is a materially different outcome from "3d."'s
+own fix, which — even though partial — showed a clean, monotonic, real
+effect. Two checks confirm this null result isn't just an unlucky default
+magnitude:
+
+- **A magnitude sweep across the ENTIRE valid range shows no dose-response
+  anywhere in it.** Unlike `active_hours_minutes` (unbounded upward —
+  "3d."'s sweep pushed it to 600, a physically unrealistic 10-hour offset,
+  to find where an effect appears) or `protocol_weight_fraction`,
+  `skip_day_probability_fraction` is capped at exactly `1.0` by
+  construction (past that the multiplicative factor would go negative —
+  see `jittered_skip_day_probability`'s doc comment). So the sweep below
+  covers *100% of this parameter's possible range*, not just "up to an
+  unshippable point":
+
+  | skip_day_probability_fraction | ARI (mean, 50 trials) |
+  |---|---|
+  | 0.0 (no skip-day jitter — identical to the "3d." POST-fix row) | 0.4140 |
+  | 0.15 (shipped default) | 0.4142 |
+  | 0.30 | 0.4080 |
+  | 0.50 | 0.4160 |
+  | 0.80 | 0.4064 |
+  | 1.0 (maximum possible) | 0.3968 |
+
+  The entire sweep stays inside `[0.3968, 0.4160]` — a spread of 0.019, an
+  order of magnitude smaller than the ±0.10 trial-to-trial std at any
+  single point, with no monotonic trend (0.50 sits *above* both 0.15 and
+  0.30). This is flat noise, not the small-but-real, monotonic effect
+  "3d."'s own sweep showed.
+- **The per-feature separability diagnostic doesn't show a clean drop
+  either.** `actions_per_day` separability across the same sweep (one
+  representative trial per point, not averaged — see the same caveat "3d."
+  already documents for `frac_marinade_stake`): 1.76 (fraction=0) -> 2.19
+  (0.15) -> 2.20 (0.30) -> 1.78 (0.50) -> 1.64 (0.80) -> 2.16 (1.0). No
+  consistent downward trend; several points sit *higher* than the no-jitter
+  baseline. Read this as single-trial noise dominating a small underlying
+  effect, not as skip-day jitter making clustering *easier* — the
+  50-trial-averaged ARI above is the trustworthy number, and it says "no
+  significant effect," not "backfired." As a sanity check that the jitter
+  is properly isolated, the two features it should NOT touch stayed within
+  the same single-trial noise band across the sweep's endpoints:
+  `mean_hour_of_day` 0.84 -> 0.87, `frac_jupiter_swap` 4.20 -> 4.20,
+  `frac_marinade_stake` 2.38 -> 2.54, `frac_orca_lp` 0.34 -> 0.33.
+
+**Why this specific jitter likely doesn't work, even though it's
+implemented and wired correctly** (verified independently of the ARI/NMI
+result: unit tests in `persona.rs` and `agent/mod.rs` confirm each agent's
+`skip_day_probability` is genuinely different, reproducible, and bounded;
+a dedicated `clustering.rs` regression test confirms the harness's
+simulation actually consumes the per-agent value, not the operator's
+shared field): `actions_per_day` is a noisier statistic than
+`mean_hour_of_day` or the `frac_*` protocol shares, and its dominant source
+of cross-operator separability is plausibly `mean_interval_minutes` —
+drawn independently per operator (`rng.gen_range(15.0..90.0)`, a 6x range)
+in *every* scenario, including `shared_persona` — rather than
+`skip_day_probability`. Evidence for this: even `Persona::Diverse`'s own
+*operator-level* `skip_day_probability` diversity (the full `0.05..0.30`
+range, applied *between* operators — a far bigger lever than a ±15%
+*within*-operator perturbation) only moved `actions_per_day` separability
+by roughly 1.15-1.3x when persona diversity was turned on (`tight_timing`:
+3.04 -> 3.52; `wide_timing`: 1.39 -> 1.76) — nowhere near the 20x+ jump
+`mean_hour_of_day` and `frac_*` show under the same shared-to-diverse
+transition (see "3c."). If `skip_day_probability` was only ever a minor
+contributor to `actions_per_day`'s separability, a smaller *per-agent*
+perturbation of the same parameter was unlikely to move it further. This
+is a hypothesis consistent with the evidence above, not an independently
+isolated proof — that would need an ablation scenario varying only
+`mean_interval_minutes` per agent, out of scope for this session (see
+Roadmap).
+
+**Conclusion, stated plainly**: `skip_day_probability` jitter is
+implemented, tested, and wired into both the real `Agent` and the harness
+exactly like its two siblings — but measured to have no detectable effect
+on multi-wallet clustering resistance at this harness's scale, across its
+entire valid magnitude range. The residual "3d." named is very likely NOT
+primarily `skip_day_probability` after all; `mean_interval_minutes` (never
+jittered per agent, in this or any prior session) is the more likely
+dominant remaining contributor to `actions_per_day`'s separability — see
+Roadmap for the next concrete step this points to.
 
 ## Why this design
 
@@ -377,9 +506,10 @@ detectors.rs    logistic regression + ROC AUC — the stronger named baseline in
 clustering.rs   wallet-history simulator + feature extraction + from-scratch k-means/ARI/NMI —
 backs clustering_harness, reuses timing.rs + protocols::ProtocolRegistry::pick_with_rng
 consolidation.rs  periodic fund consolidation across one operator's fleet (opt-in, see below)
-persona.rs      per-agent persona jitter (active_hours + protocol weights), derived from each
-agent's own wallet pubkey — shared by the real Agent AND clustering_harness's
-post-fix scenario, so the harness measures exactly what ships (see "3d.")
+persona.rs      per-agent persona jitter (active_hours + protocol weights + skip-day
+probability), derived from each agent's own wallet pubkey — shared by the
+real Agent AND clustering_harness's post-fix scenarios, so the harness
+measures exactly what ships (see "3d." / "3e.")
 state.rs        single-checkpoint crash recovery (atomic save/resume), see scripts/recovery_test.sh
 agent/          single-agent behavior loop (timing, active hours + persona jitter, skip-day,
 checkpointing) — each agent owns its own jittered ProtocolRegistry, not a fleet-shared one
@@ -500,17 +630,22 @@ fund-consolidation cadence/fraction) live in `cooker.toml` — see
   correct operator *more* accurately (ARI 0.42) than a naive tight-timing
   baseline (ARI 0.08), because `active_hours`/protocol weights used to be
   shared identically across one operator's whole fleet. `src/persona.rs`
-  now jitters both per-agent (shipped on by default, see "3d." and
+  now jitters all three of active_hours/protocol weights/skip-day
+  probability per-agent (shipped on by default, see "3d."/"3e." and
   `cooker.example.toml`'s `[persona_jitter]`), but the measured effect at
   the shipped conservative default is small (ARI 0.4214 -> 0.4140) — and a
-  sensitivity sweep shows even physically-unrealistic jitter magnitudes
-  (far past what's shippable without destroying individual-agent
-  believability) only bring it down to ~0.17, not the naive baseline's
-  0.08. Reported and explained, not hidden or amplified — see "3c." and
-  "3d." above and "Multi-wallet clustering" in `THREAT_MODEL.md` for the
-  full breakdown, including why an un-jittered residual signal
-  (`actions_per_day`, driven by per-operator `skip_day_probability`) puts a
-  floor under this fix's effect.
+  sensitivity sweep on the first two shows even physically-unrealistic
+  jitter magnitudes (far past what's shippable without destroying
+  individual-agent believability) only bring it down to ~0.17, not the
+  naive baseline's 0.08. The third jitter (skip-day probability, added to
+  target the specific residual causing that floor) was measured to have NO
+  significant additional effect at any magnitude across its entire valid
+  range — see "3e." — meaning the residual is very likely driven by
+  something this session didn't jitter (`mean_interval_minutes`, see
+  Roadmap), not by `skip_day_probability` as originally suspected in "3d."
+  Reported and explained, not hidden or amplified — see "3c.", "3d.", "3e."
+  above and "Multi-wallet clustering" in `THREAT_MODEL.md` for the full
+  breakdown.
 - **Fund consolidation trades away some (already out-of-scope) value-channel
   privacy for the edital's required behavior.** A direct wallet-to-wallet
   transfer is a strong signal to a funding-graph-aware adversary; this
@@ -553,14 +688,28 @@ self-audit (region, language, submission modality, originality).
       **partial** mitigation (ARI 0.4214 -> 0.4140 at the shipped default),
       not a full resolution — see "3d." for the sensitivity sweep and why
       the shipped magnitude is deliberately conservative.
-- [ ] **Close persona jitter's remaining residual signal**: the sweep in
-      "3d." shows `actions_per_day` (driven by per-operator
-      `skip_day_probability`, not currently jittered per agent) puts a
-      floor under how far ARI can drop from active_hours/protocol-weight
-      jitter alone. Jittering `skip_day_probability` (and possibly the
-      timing-shape parameters) per agent is the concrete next step, scoped
-      out of this session to keep the fix's blast radius limited to the
-      two features "3c." identified as dominant.
+- [x] **Close persona jitter's remaining residual signal — attempted,
+      implemented, and measured; did not close it.** `src/persona.rs::jittered_skip_day_probability`
+      (see "3e." above) jitters each agent's own daily skip probability
+      exactly like the two siblings before it, wired into both the real
+      `Agent` and `clustering_harness`'s new 7th scenario. Measured result:
+      **no significant ARI/NMI effect at any tested magnitude** — a full
+      0.0-1.0 sweep of the only parameter this fix controls (its entire
+      valid range, unlike the other two jitters which have no natural
+      upper bound) stays inside `[0.3968, 0.4160]`, noise-level movement
+      with no monotonic trend. The residual "3d." found is very likely NOT
+      primarily `skip_day_probability` after all — see "3e." for the
+      evidence and the `mean_interval_minutes` hypothesis it points to
+      instead.
+- [ ] **Jitter `mean_interval_minutes` per agent**: "3e."'s evidence points
+      to per-operator `mean_interval_minutes` (a 6x range, 15-90 minutes,
+      randomized per operator in every `clustering_harness` scenario
+      including `shared_persona`) as a more likely dominant contributor to
+      `actions_per_day`'s residual separability than `skip_day_probability`
+      turned out to be. Not implemented or measured this session — the
+      evidence for this specific hypothesis is indirect (see "3e."'s
+      reasoning), not an isolated ablation, so it's named here as the next
+      concrete thing to test rather than assumed correct.
 - [ ] Route fund-consolidation transfers through `supersonic_cast` /
       `supersonic-tx` instead of a plain transfer, to reduce (not eliminate)
       consolidation's value-channel exposure — see "Fund consolidation" in

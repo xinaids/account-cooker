@@ -75,29 +75,34 @@ pub fn simulate_wallet(
         registry,
         actions_target,
         active_window_minutes,
+        operator.timing.skip_day_probability,
         rng,
     )
 }
 
 /// Same simulation as `simulate_wallet`, but with the active-hours window
-/// given explicitly in minutes-since-midnight instead of derived from
-/// `operator.timing.active_hours`. Lets a caller (e.g. `clustering_harness`'s
-/// persona-jitter scenario) supply a per-AGENT jittered window — see
-/// `persona::jittered_active_hours_minutes` — instead of the operator's
-/// shared one, while everything else (skip-day roll, protocol choice,
-/// interval sampling) is identical to `simulate_wallet`.
+/// AND the daily skip probability given explicitly instead of derived from
+/// `operator.timing`. Lets a caller (e.g. `clustering_harness`'s
+/// persona-jitter scenarios) supply a per-AGENT jittered window and/or skip
+/// probability — see `persona::jittered_active_hours_minutes` /
+/// `persona::jittered_skip_day_probability` — instead of the operator's
+/// shared ones, while everything else (protocol choice, interval sampling)
+/// is identical to `simulate_wallet`.
 ///
-/// `simulate_wallet` is a thin wrapper around this function using the
-/// operator's own window unmodified, so it is unaffected by this split:
-/// for integer-hour boundaries, `floor(x/60) < 60k` iff `floor(x/3600) < k`
-/// for any non-negative integers `x, k`, so comparing minute-of-day against
-/// an exact hour boundary expressed in minutes gives bit-identical results
-/// to the old hour-granularity comparison.
+/// `simulate_wallet` is a thin wrapper around this function passing the
+/// operator's own window and skip probability through unmodified, so it is
+/// unaffected by this split: for integer-hour boundaries, `floor(x/60) <
+/// 60k` iff `floor(x/3600) < k` for any non-negative integers `x, k`, so
+/// comparing minute-of-day against an exact hour boundary expressed in
+/// minutes gives bit-identical results to the old hour-granularity
+/// comparison, and forwarding `operator.timing.skip_day_probability`
+/// unchanged gives bit-identical results to the old internal-lookup version.
 pub fn simulate_wallet_with_window(
     operator: &OperatorConfig,
     registry: &ProtocolRegistry,
     actions_target: usize,
     active_window_minutes: (u32, u32),
+    skip_day_probability: f64,
     rng: &mut impl Rng,
 ) -> Vec<SimAction> {
     let mut actions = Vec::with_capacity(actions_target);
@@ -107,7 +112,7 @@ pub fn simulate_wallet_with_window(
     // decision being made from identical clock=0 state.
     let mut clock: u64 = rng.gen_range(0..SECS_PER_DAY);
     let mut current_day = clock / SECS_PER_DAY;
-    let mut skip_today = rng.gen_bool(operator.timing.skip_day_probability);
+    let mut skip_today = rng.gen_bool(skip_day_probability);
 
     let active_start = active_window_minutes.0 as u64;
     let active_end = active_window_minutes.1 as u64;
@@ -128,7 +133,7 @@ pub fn simulate_wallet_with_window(
         let day = clock / SECS_PER_DAY;
         if day != current_day {
             current_day = day;
-            skip_today = rng.gen_bool(operator.timing.skip_day_probability);
+            skip_today = rng.gen_bool(skip_day_probability);
         }
 
         let minute_of_day = (clock % SECS_PER_DAY) / SECS_PER_MINUTE;
@@ -704,7 +709,15 @@ mod tests {
             }],
         };
         let registry = ProtocolRegistry::from_config(&operator.protocols).unwrap();
-        let actions = simulate_wallet_with_window(&operator, &registry, 20, (500, 600), &mut rng);
+        let skip_day_probability = operator.timing.skip_day_probability;
+        let actions = simulate_wallet_with_window(
+            &operator,
+            &registry,
+            20,
+            (500, 600),
+            skip_day_probability,
+            &mut rng,
+        );
         assert_eq!(actions.len(), 20);
         for a in &actions {
             let minute_of_day = (a.timestamp_secs % SECS_PER_DAY) / SECS_PER_MINUTE;
@@ -713,6 +726,39 @@ mod tests {
                 "action fired outside jittered window: minute {minute_of_day}"
             );
         }
+    }
+
+    /// Regression test proving the explicit `skip_day_probability` PARAMETER
+    /// drives the skip-day roll, not `operator.timing.skip_day_probability`
+    /// (which stays at a moderate 0.15 here). `1.0` forces every simulated
+    /// day to be skipped, so the wallet never reaches `actions_target` and
+    /// the function's own pathological-config guard (see its doc comment)
+    /// terminates the loop with zero actions — a result the operator's own
+    /// 0.15 field could never produce on its own within this guard limit.
+    #[test]
+    fn simulate_wallet_with_window_uses_the_explicit_skip_day_probability_override() {
+        let mut rng = ChaCha8Rng::seed_from_u64(17);
+        let operator = OperatorConfig {
+            timing: TimingConfig {
+                mean_interval_minutes: 45.0,
+                stddev_interval_minutes: 30.0,
+                active_hours: [8, 23],
+                skip_day_probability: 0.15,
+            },
+            protocols: vec![ProtocolConfig {
+                name: "jupiter_swap".to_string(),
+                weight: 1.0,
+                params: toml::Table::new(),
+            }],
+        };
+        let registry = ProtocolRegistry::from_config(&operator.protocols).unwrap();
+        let actions =
+            simulate_wallet_with_window(&operator, &registry, 5, (8 * 60, 23 * 60), 1.0, &mut rng);
+        assert!(
+            actions.is_empty(),
+            "skip_day_probability=1.0 override should never act, got {} actions",
+            actions.len()
+        );
     }
 
     #[test]

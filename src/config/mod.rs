@@ -99,13 +99,14 @@ impl Default for ConsolidationConfig {
 }
 
 /// Per-agent persona jitter: nudges each agent's derived `active_hours`
-/// window and protocol weights independently around the operator's base
-/// `[timing]` / `[[protocols]]` persona, instead of every wallet in a fleet
-/// sharing those values byte-for-byte. Implements the recommendation named
-/// (but not implemented) in `THREAT_MODEL.md`'s "Multi-wallet clustering"
-/// section: `clustering_harness` found persona-sharing, not timing spread,
-/// is the dominant signal for grouping a fleet's wallets back to one
-/// operator (ARI 0.42 vs 0.08 for a naive tight-timing baseline).
+/// window, protocol weights, and daily skip probability independently
+/// around the operator's base `[timing]` / `[[protocols]]` persona, instead
+/// of every wallet in a fleet sharing those values byte-for-byte. Implements
+/// the recommendation named (but not implemented) in `THREAT_MODEL.md`'s
+/// "Multi-wallet clustering" section: `clustering_harness` found
+/// persona-sharing, not timing spread, is the dominant signal for grouping a
+/// fleet's wallets back to one operator (ARI 0.42 vs 0.08 for a naive
+/// tight-timing baseline).
 ///
 /// Each agent's own offset is derived deterministically from its own wallet
 /// pubkey (`src/persona.rs`), never a shared/global RNG — see
@@ -119,10 +120,12 @@ impl Default for ConsolidationConfig {
 /// no funds movement, no third-party code path — and the vulnerability it
 /// fixes is otherwise present in `cooker.example.toml`'s defaults out of the
 /// box. So it ships ACTIVE by default, at a small, conservative magnitude
-/// (30 minutes / 15%). An operator who wants the pre-fix
-/// byte-identical-fleet-persona behavior back sets both fields to `0.0`. A
-/// `cooker.toml` predating this block parses fine and gets these same
-/// defaults (see `Default` impl below) — never a hard parse error.
+/// (30 minutes / 15% / 15%). An operator who wants the pre-fix
+/// byte-identical-fleet-persona behavior back sets all three fields to
+/// `0.0`. A `cooker.toml` predating this block, or predating
+/// `skip_day_probability_fraction`'s addition to it, parses fine and gets
+/// these same defaults (see `Default` impl below) — never a hard parse
+/// error.
 #[derive(Debug, Deserialize, Clone)]
 pub struct PersonaJitterConfig {
     /// Max minutes each agent's active_hours window is shifted from the
@@ -148,6 +151,20 @@ pub struct PersonaJitterConfig {
     /// the full reasoning. `0.0` disables protocol-weight jitter entirely.
     #[serde(default = "default_jitter_protocol_weight_fraction")]
     pub protocol_weight_fraction: f64,
+    /// Max fractional perturbation applied to each agent's own daily
+    /// skip-day probability, e.g. `0.15` = an agent's actual
+    /// `skip_day_probability` is the operator's configured value times a
+    /// factor drawn from `[0.85, 1.15]`, then clamped to `[0.0, 1.0]` (a
+    /// probability, unlike a protocol weight, cannot legitimately exceed
+    /// `1.0` — see `src/persona.rs::jittered_skip_day_probability`). Closes
+    /// the residual signal README.md's "3d." found after shipping the two
+    /// fields above alone: `actions_per_day` (driven partly by
+    /// `skip_day_probability`, which `cooker.toml` sets once per operator)
+    /// held roughly steady at 1.6-2.9 separability across that sweep — an
+    /// un-jittered signal this field targets directly. `0.0` disables
+    /// skip-day jitter entirely.
+    #[serde(default = "default_jitter_skip_day_probability_fraction")]
+    pub skip_day_probability_fraction: f64,
 }
 
 impl Default for PersonaJitterConfig {
@@ -155,6 +172,7 @@ impl Default for PersonaJitterConfig {
         Self {
             active_hours_minutes: default_jitter_active_hours_minutes(),
             protocol_weight_fraction: default_jitter_protocol_weight_fraction(),
+            skip_day_probability_fraction: default_jitter_skip_day_probability_fraction(),
         }
     }
 }
@@ -190,6 +208,9 @@ fn default_jitter_active_hours_minutes() -> f64 {
     30.0
 }
 fn default_jitter_protocol_weight_fraction() -> f64 {
+    0.15
+}
+fn default_jitter_skip_day_probability_fraction() -> f64 {
     0.15
 }
 
@@ -237,6 +258,9 @@ impl CookerConfig {
         if !(0.0..=1.0).contains(&self.persona_jitter.protocol_weight_fraction) {
             anyhow::bail!("persona_jitter.protocol_weight_fraction must be within [0.0, 1.0]");
         }
+        if !(0.0..=1.0).contains(&self.persona_jitter.skip_day_probability_fraction) {
+            anyhow::bail!("persona_jitter.skip_day_probability_fraction must be within [0.0, 1.0]");
+        }
         Ok(())
     }
 }
@@ -275,6 +299,38 @@ mod tests {
             toml::from_str(toml_str).expect("must parse without persona_jitter");
         assert_eq!(cfg.persona_jitter.active_hours_minutes, 30.0);
         assert_eq!(cfg.persona_jitter.protocol_weight_fraction, 0.15);
+        assert_eq!(cfg.persona_jitter.skip_day_probability_fraction, 0.15);
+    }
+
+    /// Regression test for a `cooker.toml` written after `[persona_jitter]`
+    /// existed but BEFORE `skip_day_probability_fraction` was added to it
+    /// (only the original two fields present) — must still parse, and the
+    /// new field must fall back to its own documented default rather than
+    /// erroring or silently zeroing.
+    #[test]
+    fn config_with_persona_jitter_block_predating_skip_day_field_gets_default() {
+        let toml_str = r#"
+            rpc_url = "https://api.devnet.solana.com"
+
+            [timing]
+            mean_interval_minutes = 45.0
+            stddev_interval_minutes = 30.0
+            active_hours = [8, 23]
+
+            [[wallets]]
+            keypair_path = "wallets/agent-01.json"
+
+            [[protocols]]
+            name = "jupiter_swap"
+
+            [persona_jitter]
+            active_hours_minutes = 30.0
+            protocol_weight_fraction = 0.15
+        "#;
+
+        let cfg: CookerConfig = toml::from_str(toml_str)
+            .expect("must parse a persona_jitter block predating skip_day_probability_fraction");
+        assert_eq!(cfg.persona_jitter.skip_day_probability_fraction, 0.15);
     }
 
     #[test]
@@ -296,11 +352,13 @@ mod tests {
             [persona_jitter]
             active_hours_minutes = 0.0
             protocol_weight_fraction = 0.0
+            skip_day_probability_fraction = 0.0
         "#;
 
         let cfg: CookerConfig = toml::from_str(toml_str).expect("must parse explicit zero jitter");
         assert_eq!(cfg.persona_jitter.active_hours_minutes, 0.0);
         assert_eq!(cfg.persona_jitter.protocol_weight_fraction, 0.0);
+        assert_eq!(cfg.persona_jitter.skip_day_probability_fraction, 0.0);
     }
 
     #[test]
@@ -333,6 +391,10 @@ mod tests {
 
         cfg.persona_jitter.protocol_weight_fraction = 0.15;
         cfg.persona_jitter.active_hours_minutes = -1.0;
+        assert!(cfg.validate().is_err());
+
+        cfg.persona_jitter.active_hours_minutes = 30.0;
+        cfg.persona_jitter.skip_day_probability_fraction = 1.5;
         assert!(cfg.validate().is_err());
     }
 }

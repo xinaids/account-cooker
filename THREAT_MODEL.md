@@ -261,6 +261,50 @@ individual-agent believability faster than it buys clustering resistance.
 Full methodology, diagnostic output, and narrative: `README.md`'s "3d.
 Per-agent persona jitter — the fix, measured".
 
+**Skip-day-probability jitter — attempted, measured, did not close the
+gap.** `src/persona.rs::jittered_skip_day_probability` extends the same
+deterministic-per-wallet-pubkey approach to the one parameter the
+active-hours/protocol-weight fix above left un-jittered per agent: each
+agent's own daily skip probability is now the operator's base value times
+an independent multiplicative factor (clamped to `[0.0, 1.0]`, since a
+probability — unlike a protocol weight — cannot exceed `1.0`), rather than
+every agent in a fleet sharing the operator's exact value. A seventh
+`clustering_harness` scenario (`... + agent_jitter + skip_day_jitter`)
+measures it, holding operator-level generation and the other two jitter
+magnitudes byte-identical to the sixth (POST-fix) row so any difference
+isolates this fix's own effect:
+
+| Scenario | ARI (mean ± std, 50 trials) | NMI (mean ± std, 50 trials) |
+|---|---|---|
+| `... + agent_jitter` (POST-fix) | 0.4140 ± 0.1046 | 0.6076 ± 0.0894 |
+| `... + agent_jitter + skip_day_jitter` (this fix, shipped default) | 0.4142 ± 0.1056 | 0.6050 ± 0.0937 |
+
+**Honest result: no measurable effect.** ARI moves by +0.0002 (noise, not
+an improvement); NMI moves by -0.0026 — both far inside one trial-to-trial
+standard deviation. A sweep across `skip_day_probability_fraction`'s ENTIRE
+valid range (`0.0` to `1.0` — unlike the other two jitter parameters, this
+one has a natural upper bound, since past `1.0` the multiplicative factor
+would go negative) stays inside `[0.3968, 0.4160]` with no monotonic
+trend — flat noise, not the small-but-real dose-response the
+active-hours/protocol-weight sweep showed. The most likely explanation:
+`actions_per_day`'s separability is plausibly dominated by
+`mean_interval_minutes` (randomized per operator, a 6x range, in every
+scenario including `shared_persona`), not `skip_day_probability` —
+`Persona::Diverse`'s own much-larger *operator-level*
+`skip_day_probability` range only moved `actions_per_day` separability
+~1.15-1.3x, far short of the 20x+ jump the two genuinely-dominant features
+show under the same shared-to-diverse transition. This is a hypothesis,
+not an isolated proof — see README.md's "3e." for the full evidence and
+reasoning, and README.md's Roadmap for the concrete next step
+(`mean_interval_minutes` per-agent jitter) this points to instead.
+Implemented, tested (unit tests confirm the per-agent value is genuinely
+different, reproducible, and bounded; a dedicated regression test confirms
+the harness's simulation consumes the per-agent value, not the operator's
+shared field), and shipped — but a measured non-improvement, reported as
+such rather than hidden. Full methodology, diagnostic output, and
+narrative: README.md's "3e. Skip-day-probability jitter — measured, and it
+doesn't move the needle".
+
 **Scope**: this measures clustering resistance on observable **behavioral**
 features only (timing shape, active-hours signature, protocol mix) — the
 same class of signal `timing_harness` measures for one wallet, aggregated
