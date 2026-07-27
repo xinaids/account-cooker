@@ -193,6 +193,92 @@ independent of the safety argument above holding up. `src/bin/dao_vote_test.rs`
 reproduces the exact simulation above for anyone who wants to verify it
 firsthand before deciding whether to opt in for real.
 
+### 1d. NFT mint + transfer — a real 1/1 mint, "flipped" to a self-controlled sibling (devnet)
+
+The edital's third protocol category: minting and moving NFTs. `src/protocols/nft_flip.rs`
+mints a brand-new 1/1 NFT via the
+[Metaplex Token Metadata](https://developers.metaplex.com/token-metadata) program
+(`CreateV1` + `MintV1`, deployed at `metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s` —
+verified live on both mainnet-beta and devnet, same methodology as `dao_vote.rs`:
+`solana account metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s --url <mainnet-beta|devnet>`,
+both `executable: true` with byte-identical `ProgramData`), then optionally transfers it
+to a sibling address derived from the wallet itself — never a third party, same pattern
+as `supersonic_cast.rs`'s decoy destination.
+
+**Official crate, not hand-built — unlike `marinade.rs`/`dao_vote.rs`.** The official
+`mpl-token-metadata` v5.1.1 crate was checked the same way the marinade/spl-governance
+crates were: `cargo add --dry-run`, inspect `Cargo.lock` for a duplicate/conflicting
+`solana-program`, then a real `cargo build`. Unlike those two, it resolved cleanly to a
+single unified `solana-program v2.3.0` and compiled without incident — so `CreateV1` and
+`MintV1` use the real crate's instruction builders directly, not hand-encoded Borsh.
+
+**Why this is safe to mint for real — a stronger guarantee than `dao_vote.rs`'s.**
+`dao_vote.rs` necessarily interacts with a real third party's proposal (there's no way to
+"vote" on nothing); `nft_flip.rs` doesn't have that constraint. The mint is a brand-new
+`Keypair::new()` generated fresh on every call and passed to `CreateV1` as a signer —
+there is no code path anywhere in the file that reads, resolves, or accepts an
+already-existing mint from config or from chain. It is architecturally impossible for
+this protocol to touch, or be confused with, someone else's real NFT. The optional
+"flip" leg's destination is derived exactly like `supersonic_cast.rs`'s sibling address
+(`Sha256(TAG || wallet_secret) → keypair_from_seed`, own domain-separation tag) —
+reimplemented locally rather than importing `supersonic_sdk`, so only the derived
+`.pubkey()` is ever used and the two protocols' sibling addresses can never collide. No
+config field names an external address at all (unlike `dao_vote.rs`'s `proposal_pubkey`
+or `supersonic_cast.rs`'s `router_program_id`) — see the module doc in `nft_flip.rs` for
+the full argument.
+
+| # | What was tested | Result | Proof |
+|---|---|---|---|
+| 9 | `NftFlip::execute_returning_mint` (`src/bin/nft_flip_test.rs`) — the real `Protocol` trait code path — against devnet: mint + metadata + master edition created, 1 unit minted, then transferred to the derived sibling's associated token account | **PASS** — confirmed on-chain, then independently re-verified after the fact | [tx](https://explorer.solana.com/tx/4PYBmYmfqEDfzuvnyS53qRD9Hdy76yCpLHN6MGQcUFgzK1bTgL9BbPzq9DrkULw2N8cHyoRCZ9QCdhNumdPvGpmH?cluster=devnet), [mint](https://explorer.solana.com/address/ABFm3vkWBWmy5myjDnsnZwzXCAtyeDEWiRjUgiNVnMkY?cluster=devnet) |
+
+```
+$ ./target/release/nft_flip_test wallets/agent-01.json https://api.devnet.solana.com
+...
+NFT_FLIP_SEND=1 set — simulating then sending real mint...
+CONFIRMED: signature 4PYBmYmfqEDfzuvnyS53qRD9Hdy76yCpLHN6MGQcUFgzK1bTgL9BbPzq9DrkULw2N8cHyoRCZ9QCdhNumdPvGpmH
+  mint: ABFm3vkWBWmy5myjDnsnZwzXCAtyeDEWiRjUgiNVnMkY
+```
+
+Independently re-checked after the send — not just trusting the CLI's "CONFIRMED":
+
+```
+$ spl-token balance --address CeQjTCNtZUAGxwtu3v2LPuRCNVXM7c7aiQFs6bg9Ar2C --url devnet   # wallet's own ATA
+0
+$ spl-token balance --address 5g1KomiVYKrYWUkP5PCD3Uw7Jr6um1fEBdw8YpRNfTie --url devnet   # sibling's ATA
+1
+$ spl-token supply ABFm3vkWBWmy5myjDnsnZwzXCAtyeDEWiRjUgiNVnMkY --url devnet
+1
+```
+
+The NFT landed exactly where the design says it should: 0 in the wallet's own token
+account, 1 in the sibling's — the "flip" is real, not just a clean simulation. Total real
+cost: 0.02169584 SOL (rent for 2 new token accounts + mint + metadata + master edition,
+plus fee) — `min_balance_lamports`'s default (0.025 SOL) was set from this exact
+measurement, not a guess.
+
+**A real bug this real send caught, worth stating plainly.** The first devnet simulation
+attempt failed with `Missing SPL token program` (`custom program error: 0x95`) — leaving
+`CreateV1Builder`'s `spl_token_program` unset does *not* fall back to the real Token
+program the way `system_program`/`sysvar_instructions` do; the builder instead pushes the
+Metadata program's own ID as a placeholder, which the on-chain processor rejects. Fixed
+by setting `.spl_token_program(Some(token_program))` explicitly. Exactly the kind of gap
+a "looks right, never actually run" review misses.
+
+**Not enabled by default** — `weight = 0.0` in `cooker.example.toml`, same precedent as
+`supersonic_cast`/`dao_vote`.
+
+**Deliberate decision: no mainnet send — the devnet proof stands as complete.**
+Unlike `jupiter_swap`, where mainnet was necessary because devnet has no comparable DEX
+liquidity or routing (a devnet swap would prove nothing about the real aggregator path),
+NFT minting via Metaplex Token Metadata is the same deployed program, same instructions,
+same account layout on both clusters (verified byte-identical above). The real devnet
+send already exercises the exact `Protocol::execute` code path mainnet would run, and the
+independent `spl-token` re-verification confirms the outcome matches the design exactly —
+mainnet would spend ~0.022 real SOL to re-confirm something already conclusively proven,
+not to learn anything new. So, same posture as `dao_vote.rs`'s "no real mainnet vote"
+call, this is a deliberate decision by the repo author, not a gap left open pending
+permission.
+
 ### 2. Crash recovery — real SIGKILL, not a mocked failure
 
 ```
@@ -629,6 +715,7 @@ marinade.rs     liquid staking — deposit SOL, mint mSOL (implemented)
 orca_lp.rs      concentrated liquidity positions (skeleton, see TODO)
 supersonic_cast.rs  casts noise transfers through the supersonic-tx router (implemented, opt-in)
 dao_vote.rs         casts a vote via SPL Governance (Realms), zero weight by construction (implemented, opt-in)
+nft_flip.rs         mints a fresh 1/1 NFT (Metaplex Token Metadata), optionally flips it to a self-controlled sibling (implemented, opt-in)
 
 Adding a new protocol means implementing the `Protocol` trait
 (`src/protocols/mod.rs`) and registering its name in `ProtocolRegistry::from_config`.
@@ -677,6 +764,10 @@ cargo test --release
 # 9. Prove the supersonic_cast protocol against devnet (opt-in, not enabled by
 #    default — see Status table)
 cargo run --release --bin supersonic_cast_test -- <funded-devnet-keypair.json>
+
+# 10. Prove the nft_flip protocol against devnet (opt-in, not enabled by
+#     default — see Status table). Simulates only unless NFT_FLIP_SEND=1.
+cargo run --release --bin nft_flip_test -- <funded-devnet-keypair.json> https://api.devnet.solana.com
 ```
 
 All behavior-relevant parameters (mint list, swap size floor, timing
@@ -693,6 +784,7 @@ fund-consolidation cadence/fraction) live in `cooker.toml` — see
 | `orca_lp`       | Skeleton — instruction building TODO |
 | `supersonic_cast` | **Implemented** — casts bundles through the `supersonic-tx` router (PR #1, Jmkoygg) via its public SDK, validated with 1 signed devnet transaction (see "1b. Composability" above). Not a router reimplementation; `weight = 0.0` in `cooker.example.toml` by default. |
 | `dao_vote`      | **Implemented** — hand-built `CastVote` instruction against SPL Governance (Realms), permissionlessly creating a zero-balance `TokenOwnerRecord` first so the vote carries mathematically zero voting weight by construction. Validated with a clean simulation against 2 real, currently-active mainnet DAO proposals, and real on-chain instruction-level execution against a (expired) real devnet proposal — see "1c. DAO governance voting" above. `weight = 0.0` in `cooker.example.toml` by default. |
+| `nft_flip`      | **Implemented** — mints a fresh 1/1 NFT via the official `mpl-token-metadata` crate's `CreateV1`/`MintV1` (no hand-built Borsh, unlike `marinade`/`dao_vote` — the crate resolved cleanly against this project's `solana-sdk`), then optionally transfers it to a sibling address derived from the wallet itself, never a third party. Validated with a real, independently-reverified signed devnet transaction — see "1d. NFT mint + transfer" above. `weight = 0.0` in `cooker.example.toml` by default. |
 
 | Feature | Status |
 |---|---|
@@ -780,6 +872,11 @@ self-audit (region, language, submission modality, originality).
       `CastVote` on SPL Governance (Realms) with mathematically zero voting
       weight by construction (permissionless zero-balance `TokenOwnerRecord`,
       never deposits tokens) — see "1c." above. `weight = 0.0` by default.
+- [x] **NFT mint + transfer** — `src/protocols/nft_flip.rs`, mints a real,
+      brand-new 1/1 NFT via the official `mpl-token-metadata` crate
+      (`CreateV1`/`MintV1`) and optionally flips it to a wallet-derived
+      sibling address, never a third party — see "1d." above. `weight = 0.0`
+      by default.
 - [ ] Complete Orca Whirlpools integration (Marinade is done — see Status)
 - [x] Fund splitting / periodic consolidation across agent wallets — see
       `src/consolidation.rs`, disabled by default (see Known Limitations for

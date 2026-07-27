@@ -68,6 +68,21 @@ name = "dao_vote"
 weight = 0.0
 params = { proposal_pubkey = "REPLACE_WITH_A_REAL_PROPOSAL_PUBKEY", vote_choice = "abstain" }
 
+# Not enabled by default (weight = 0.0): mints a brand-new 1/1 NFT (Metaplex
+# Token Metadata `CreateV1` + `MintV1` — official mpl-token-metadata crate,
+# confirmed compatible with this project's solana-sdk, so unlike marinade.rs /
+# dao_vote.rs those instructions are NOT hand-built) to the wallet, then
+# transfers it to a sibling address derived from the wallet itself (same
+# "never a third party" pattern as supersonic_cast.rs). The mint is always
+# freshly created in the same transaction that mints it — this protocol can
+# never touch or be confused with an existing/third-party NFT. See
+# src/protocols/nft_flip.rs's module doc for the full safety reasoning. Set
+# weight > 0 to opt in.
+[[protocols]]
+name = "nft_flip"
+weight = 0.0
+params = { name = "account-cooker noise NFT", symbol = "NOISE", uri = "", seller_fee_basis_points = 0, flip_to_sibling = true }
+
 # Not enabled by default (enabled = false): periodically moves a small,
 # randomized fraction of one wallet's balance to another randomly-chosen
 # sibling wallet in this same fleet — the "periodically consolidates and

@@ -416,6 +416,71 @@ rejected by the program itself. Two real, currently-active mainnet proposals
 were found and cleanly simulated the same way. See README.md's "1c." for the
 full account and proof table.
 
+## NFT mint + transfer — fresh-mint-only, sibling never a third party
+
+The bounty brief asks for agents that mint and move NFTs. `src/protocols/nft_flip.rs`
+implements that against the Metaplex Token Metadata program
+(`metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s`, verified live and byte-identical on
+both mainnet-beta and devnet, same methodology as the governance program above).
+
+**The safety argument, stated precisely — structurally stronger than `dao_vote`'s.**
+`dao_vote` interacts with a real proposal it doesn't control (its safety argument is
+"the vote carries zero weight"); `nft_flip` doesn't need that kind of argument because
+it never touches anything it didn't just create. The mint passed to `CreateV1` is a
+`Keypair::new()` generated fresh inside `build_and_simulate` on every call — there is no
+config field, cache, or RPC lookup anywhere in the file that can resolve to a
+pre-existing mint. It is not "unlikely" to touch a real third party's NFT; there is no
+code path through which it could.
+
+**What the optional "flip" leg does and doesn't do.** `flip_to_sibling` (default on)
+transfers the freshly-minted NFT to `derive_sibling_pubkey(wallet)` — a pubkey computed
+as `keypair_from_seed(Sha256(SIBLING_TAG || wallet.to_bytes()))`, discarding the derived
+keypair's secret half immediately. This is the same construction as
+`supersonic_cast.rs`'s `derive_master_seed` → `derive_decoy_keypair`, reimplemented
+locally (not calling into `supersonic_sdk`) with an independent domain-separation tag
+(`account-cooker/nft_flip/sibling/v1` vs `account-cooker/supersonic-cast/master/v1`) so
+the two protocols' sibling addresses are provably unrelated even for the same wallet —
+regression-tested directly (`sibling_tag_is_domain_separated_from_supersonic_cast`).
+Unlike `dao_vote.rs` (`proposal_pubkey`) or `supersonic_cast.rs`
+(`router_program_id`), **no field in this protocol's config can be set to an
+operator- or attacker-supplied external address** — the sibling is always derived, never
+read from `params`. There is no misconfiguration that turns this into a transfer to a
+real third party.
+
+**Real send caught a real bug — the kind a simulation-only review misses.** The first
+devnet attempt failed on-chain with `Missing SPL token program`
+(`custom program error: 0x95`): `mpl-token-metadata`'s `CreateV1Builder` does not
+default `spl_token_program` to the real Token program the way it defaults
+`system_program`/`sysvar_instructions` — left unset, it silently substitutes the
+Metadata program's own ID as a placeholder account, which the on-chain processor then
+rejects. Fixed by setting `.spl_token_program(Some(token_program))` explicitly; the
+corrected version was simulated clean, sent for real on devnet, and the resulting token
+balances were independently re-queried afterward (`spl-token balance`/`supply`, not just
+the program's own reported success) to confirm the NFT landed exactly where designed:
+0 in the wallet's own associated token account, 1 in the sibling's. See README.md's "1d."
+for the full transaction, mint address, and balance-verification transcript.
+
+**Scope limitations, named rather than silently hit.** Only the classic
+`TokenStandard::NonFungible` asset type is supported — no Programmable NFT
+(`token_record`/`authorization_rules` are always omitted). No off-chain metadata JSON is
+hosted, uploaded, or validated by this protocol; `uri` can be empty or point anywhere,
+and this code makes no claim about what a wallet or indexer displays for it. Real cost
+was measured directly rather than estimated: a `flip_to_sibling = true` transaction costs
+0.02169584 SOL all-in (2 new associated-token accounts + mint + metadata + master edition
+rent, plus fee) — `min_balance_lamports`'s default (0.025 SOL) is set with headroom above
+that measured number, not a guess.
+
+**No mainnet send performed as part of this work — a deliberate decision, not a gap.**
+The distinction that makes mainnet load-bearing for `jupiter_swap` (real liquidity and
+routing that devnet simply doesn't have) doesn't apply here: Metaplex Token Metadata is
+the same program, same instructions, same account layout on both clusters (verified
+byte-identical above), so a real devnet mint already exercises the identical code path
+`Protocol::execute` would run on mainnet. The independent `spl-token` re-verification
+(balances, not just the program's reported success) confirms that proof is conclusive on
+its own terms. Sending again on mainnet would spend real SOL to re-confirm a result
+already established, not to test anything new — same posture as `dao_vote.rs`'s "no real
+mainnet vote" call.
+
 ## Out of scope, restated
 
 - Fund custody / key security

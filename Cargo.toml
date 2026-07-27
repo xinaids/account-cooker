@@ -33,6 +33,10 @@ path = "src/bin/supersonic_cast_test.rs"
 name = "dao_vote_test"
 path = "src/bin/dao_vote_test.rs"
 
+[[bin]]
+name = "nft_flip_test"
+path = "src/bin/nft_flip_test.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 solana-client = "2.1"
@@ -60,6 +64,7 @@ sha2 = "0.10"
 # PR #1 (Jmkoygg, branch feat/intent-ambiguous-router)'s public SDK, MIT-licensed. Not
 # a reimplementation of the router — see COMPOSABILITY.md.
 supersonic-sdk = { git = "https://github.com/Jmkoygg/supersonic-tx", rev = "52be0375c2b362b4a213ca919844483d45aa910f" }
+mpl-token-metadata = "5.1.1"
 
 [dev-dependencies]
 tempfile = "3"
