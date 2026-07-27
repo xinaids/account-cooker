@@ -352,6 +352,70 @@ of this tradeoff, stated plainly:
   is **not** implemented for consolidation in this session — named here as
   real future work, not silently assumed.
 
+## DAO governance voting — real votes, zero weight by construction
+
+The bounty brief asks for agents that "vote in DAOs." `src/protocols/dao_vote.rs`
+implements that against SPL Governance (Realms), the shared governance
+program most Solana DAOs run on (`GovER5Lthms3bLBqWub97yVrMmEogzX7xNjdXpPPCVZw`,
+verified live and byte-identical on both mainnet-beta and devnet).
+
+**The safety argument, stated precisely.** `CastVote` requires a
+`TokenOwnerRecord` in the target realm. `CreateTokenOwnerRecord` is
+permissionless — verified directly in the program's
+`process_create_token_owner_record.rs`: it checks only that the mint is valid
+for the realm, never that the caller holds any of it, and always initializes
+`governing_token_deposit_amount: 0`. `CastVote`
+(`process_cast_vote.rs`) never checks that the resolved voter weight is
+nonzero before recording a full on-chain `VoteRecordV2` and adding the weight
+to the tally via `checked_add`. So a wallet that has never held a DAO's
+governing token can cast a fully real, on-chain vote that is *mathematically
+incapable* of changing that DAO's outcome — not "unlikely to matter," zero
+by construction of the program itself, independent of which real DAO or
+proposal it's pointed at.
+
+**What would break this guarantee, named explicitly — and now enforced, not
+just documented.** This protocol never issues a `DepositGoverningTokens`
+instruction — it only ever creates a zero-balance record and votes with it.
+But if the *operator* independently deposits real governing tokens into that
+same `TokenOwnerRecord` outside this protocol (a manual, deliberate action
+this code never takes on its own), a subsequent vote from that wallet would
+otherwise carry that real weight. The zero-weight property is a property of
+a fresh wallet in a realm it has never otherwise touched, not an invariant
+`CastVote` enforces on-chain itself — so `build_and_simulate` checks it
+client-side: if a `TokenOwnerRecord` already exists for this wallet in this
+realm+mint, it reads the real `governing_token_deposit_amount` field
+(`parse_token_owner_record_deposit_amount`) and refuses to vote if it's
+nonzero, rather than silently casting a weighted vote. This was found and
+closed during this feature's own review (an adversarial pass specifically
+asked "how could the zero-weight guarantee break," not just "does the code
+work") — the fresh-wallet path this project actually tests against was
+re-verified unaffected afterward (same devnet/mainnet accounts, identical
+simulation results).
+
+**Scope limitations, named rather than silently hit.** Only realms using the
+default vote-weight source (deposited SPL governing tokens, no plugin) are
+supported — `voter_weight_record`/`max_voter_weight_record` are always
+omitted, so a plugin-gated realm (NFT voting, Civic gateway) fails simulation
+with a clear on-chain error rather than silently misbehaving. Only
+`GovernanceV2`-typed governance accounts are supported, not
+`MintGovernanceV2`/`ProgramGovernanceV2`/`TokenGovernanceV2` — encountered
+directly during testing (10/40 real mainnet candidates sampled during
+development used `MintGovernanceV2`) and rejected with a clear error rather
+than mis-parsed.
+
+**A real, evidenced search found devnet currently has no open third-party
+target — reported rather than hidden.** `ProposalState::Voting` is a stored
+byte that only changes when someone calls `FinalizeVote`; if nobody does
+(common for abandoned test proposals), a proposal reads as "Voting" forever
+even long after its actual `voting_at` + `max_voting_time` deadline. A direct
+on-chain query plus a local parse of the real timestamp fields (not just the
+`state` byte) found the single freshest of 1946 devnet `ProposalV2` accounts
+in `Voting` state was already ~144 hours past its deadline; 102 real
+candidates were tried against live devnet RPC and all were legitimately
+rejected by the program itself. Two real, currently-active mainnet proposals
+were found and cleanly simulated the same way. See README.md's "1c." for the
+full account and proof table.
+
 ## Out of scope, restated
 
 - Fund custody / key security

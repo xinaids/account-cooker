@@ -29,6 +29,10 @@ path = "src/bin/recovery_test.rs"
 name = "supersonic_cast_test"
 path = "src/bin/supersonic_cast_test.rs"
 
+[[bin]]
+name = "dao_vote_test"
+path = "src/bin/dao_vote_test.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 solana-client = "2.1"

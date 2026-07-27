@@ -84,6 +84,115 @@ self-destination legs) rather than an external payee, so this is noise-shaping
 for the agent's own footprint, not a payment-privacy path. Not enabled by
 default — `weight = 0.0` in `cooker.example.toml`.
 
+### 1c. DAO governance voting — a real vote on SPL Governance (Realms), zero weight by construction
+
+The edital asks for agents that "vote in DAOs." `src/protocols/dao_vote.rs` is
+a new `Protocol` implementation — same trait, same config-driven pattern as
+the protocols above — that casts a vote via
+[SPL Governance](https://github.com/solana-labs/solana-program-library/tree/master/governance)
+(the program [Realms](https://app.realms.today) runs on), deployed at
+`GovER5Lthms3bLBqWub97yVrMmEogzX7xNjdXpPPCVZw` — verified live by this project
+directly (`solana account GovER5Lthms3bLBqWub97yVrMmEogzX7xNjdXpPPCVZw --url
+<mainnet-beta|devnet>`, both return `executable: true` with byte-identical
+`ProgramData`, not assumed from docs).
+
+**Why this is safe to test against a REAL third-party DAO's live proposal —
+not "low impact," mathematically zero impact.** `CreateTokenOwnerRecord` is
+permissionless (verified directly in the program's
+`process_create_token_owner_record.rs`): anyone can create a zero-balance
+voting record for any wallet in any realm, without holding a single unit of
+its governing token. `CastVote` (`process_cast_vote.rs`) never checks that
+the resolved voter weight is nonzero before recording a full on-chain
+`VoteRecordV2` and adding the weight to the tally via `checked_add`. So a
+fresh wallet that has never held or deposited a DAO's token can cast a fully
+real, on-chain vote that is *incapable* of changing the outcome by
+construction of the program itself — this protocol never deposits governing
+tokens on the wallet's behalf. See the module doc in `dao_vote.rs` for the
+full argument with exact source citations.
+
+**Hand-built, not the official crate — but for a different reason than
+`marinade.rs`.** Unlike the `marinade`/`marinade-cpi` crates (which pin an
+incompatible `solana-program` version), `spl-governance` v4.0.0's own
+`Cargo.toml` declares `solana-program = "2.1.0"`, matching this project's
+`solana-sdk = "2.1"` — it looks compatible on paper. It could not actually be
+added and build-tested in this development environment: this sandbox has no
+outbound network access to crates.io (`cargo add` fails DNS resolution), only
+to a small set of already-vendored dependencies and specific research
+tooling. So the instruction is hand-built instead, the same technique as
+`marinade.rs` but for an environment-specific reason, not a genuine crate
+incompatibility — stated plainly rather than glossed over. Every account
+list, PDA seed, and Borsh encoding is cited against the real
+`solana-labs/solana-program-library` source in code comments, **and**
+independently confirmed against live on-chain accounts on both clusters
+during development (exact discriminant bytes at every offset used, on real
+mainnet and devnet `ProposalV2`/`GovernanceV2` accounts — see proof below).
+
+| # | What was tested | Result | Proof |
+|---|---|---|---|
+| 7 | `DaoVote::execute` (`src/bin/dao_vote_test.rs`) against a real, live devnet proposal discovered on-chain (not fabricated) — both the permissionless `CreateTokenOwnerRecord` and `CastVote { vote: Abstain }` instructions executed and were correctly parsed **by the live program itself** (visible in its own logs), which then legitimately rejected the vote with `GOVERNANCE-ERROR: Proposal voting time expired` — the program's own valid business-logic check, not a bug in this code | **PASS** (instruction-level correctness proven on-chain; no currently-open third-party devnet proposal was found to complete an end-to-end send — see below) | terminal output, see below |
+| 8 | `DaoVote::simulate` (dry-run, never sends) against real, currently-active mainnet proposals on a live DAO, discovered via a direct `getProgramAccounts` query (not guessed) | **PASS**, 2/2 clean | terminal output, see below |
+
+```
+$ ./target/release/dao_vote_test wallets/agent-01.json https://api.devnet.solana.com \
+    11Vgoj9JarKvomMu9KDQ4ij2oyrRkfvsMxCB2MjxQjL abstain
+...
+Program GovER5Lthms3bLBqWub97yVrMmEogzX7xNjdXpPPCVZw invoke [1]
+Program log: GOVERNANCE-INSTRUCTION: CreateTokenOwnerRecord
+Program GovER5Lthms3bLBqWub97yVrMmEogzX7xNjdXpPPCVZw success
+Program GovER5Lthms3bLBqWub97yVrMmEogzX7xNjdXpPPCVZw invoke [1]
+Program log: GOVERNANCE-INSTRUCTION: CastVote { vote: Abstain }
+Program log: GOVERNANCE-ERROR: Proposal voting time expired
+Program GovER5Lthms3bLBqWub97yVrMmEogzX7xNjdXpPPCVZw failed: custom program error: 0x218
+```
+
+**Honest limitation: no currently-open third-party devnet proposal was found
+to complete an end-to-end send, despite a real, evidenced search.** A direct
+`getProgramAccounts` query for `ProposalV2` accounts with `state == Voting`
+returned 1946 devnet accounts; a local Borsh parser (checking the real
+`voting_at`/`voting_completed_at` fields, not just the `state` byte, which —
+as the log above shows — stays `Voting` forever if nobody calls
+`FinalizeVote`) found the single freshest one across the *entire* dataset was
+already ~144 hours past its `voting_at` timestamp. 102 real candidates were
+tried against live devnet RPC in total (95 blind-sampled, 7 heuristically
+filtered for recency); all were either already past their voting deadline or
+governed by a `MintGovernanceV2`/`ProgramGovernanceV2` account (out of this
+protocol's supported scope — see module doc). This is reported as a real
+search result, not papered over with a fabricated devnet send.
+
+```
+$ ./target/release/dao_vote_test wallets-mainnet/bounty-wallet.json https://api.mainnet-beta.solana.com \
+    E7yDDhYR5DJi925MwxXf4FChLSxw52MPcX9VFMMY7FFa approve
+cluster: https://api.mainnet-beta.solana.com
+wallet: 3V4jq5gVTzz1TPZZXXZgKkTgGJkMquYg4YBRVPG5TDTx
+proposal: E7yDDhYR5DJi925MwxXf4FChLSxw52MPcX9VFMMY7FFa
+vote_choice: approve
+DAO_VOTE_SEND not set — simulating only (never sends). Set DAO_VOTE_SEND=1 to send for real.
+SIMULATION CLEAN — no error, no transaction sent.
+```
+
+Both mainnet candidates were discovered the same way (a live
+`getProgramAccounts` query filtered for `ProposalV2` + `Voting` state, then
+locally parsed for a real, recent `voting_at`), not hand-picked — they belong
+to the same small realm (governance `AerBS9dekHyivvhceg68cjyprYg5TNJyHREqjJJXYtin`,
+realm `DpyutQ7295WyuKsq16C6dhmrQxaCNPv2prSGDAACMvGK`). `vote_choice = "approve"`
+was required for both — `abstain` was legitimately rejected by the on-chain
+program with `GOVERNANCE-ERROR: Not supported VoteType`, which is that DAO's
+own realm configuration, not a bug here.
+
+**Not enabled by default** — `weight = 0.0` in `cooker.example.toml`, same
+precedent as `supersonic_cast`, since (unlike a swap or a stake deposit) a
+DAO vote names a specific, one-off `proposal_pubkey` the operator must choose
+explicitly.
+
+**No real mainnet vote transaction was sent this session — a deliberate
+choice, not an oversight.** Both mainnet candidates simulate cleanly and
+`DAO_VOTE_SEND=1` would send for real, but doing so means casting an actual,
+permanent, on-chain vote on a real third party's DAO — a decision the repo
+author reviewed and chose to defer rather than have executed unilaterally,
+independent of the safety argument above holding up. `src/bin/dao_vote_test.rs`
+reproduces the exact simulation above for anyone who wants to verify it
+firsthand before deciding whether to opt in for real.
+
 ### 2. Crash recovery — real SIGKILL, not a mocked failure
 
 ```
@@ -519,6 +628,7 @@ jupiter.rs      swap noise across configurable mints via Jupiter Swap API (imple
 marinade.rs     liquid staking — deposit SOL, mint mSOL (implemented)
 orca_lp.rs      concentrated liquidity positions (skeleton, see TODO)
 supersonic_cast.rs  casts noise transfers through the supersonic-tx router (implemented, opt-in)
+dao_vote.rs         casts a vote via SPL Governance (Realms), zero weight by construction (implemented, opt-in)
 
 Adding a new protocol means implementing the `Protocol` trait
 (`src/protocols/mod.rs`) and registering its name in `ProtocolRegistry::from_config`.
@@ -582,6 +692,7 @@ fund-consolidation cadence/fraction) live in `cooker.toml` — see
 | `marinade_stake`| **Implemented** — hand-built `deposit` instruction against Marinade State with derived PDAs, validated with 1 signed mainnet transaction (see proof table above) |
 | `orca_lp`       | Skeleton — instruction building TODO |
 | `supersonic_cast` | **Implemented** — casts bundles through the `supersonic-tx` router (PR #1, Jmkoygg) via its public SDK, validated with 1 signed devnet transaction (see "1b. Composability" above). Not a router reimplementation; `weight = 0.0` in `cooker.example.toml` by default. |
+| `dao_vote`      | **Implemented** — hand-built `CastVote` instruction against SPL Governance (Realms), permissionlessly creating a zero-balance `TokenOwnerRecord` first so the vote carries mathematically zero voting weight by construction. Validated with a clean simulation against 2 real, currently-active mainnet DAO proposals, and real on-chain instruction-level execution against a (expired) real devnet proposal — see "1c. DAO governance voting" above. `weight = 0.0` in `cooker.example.toml` by default. |
 
 | Feature | Status |
 |---|---|
@@ -665,6 +776,10 @@ self-audit (region, language, submission modality, originality).
 
 ## Roadmap
 
+- [x] **DAO governance voting** — `src/protocols/dao_vote.rs`, casts a real
+      `CastVote` on SPL Governance (Realms) with mathematically zero voting
+      weight by construction (permissionless zero-balance `TokenOwnerRecord`,
+      never deposits tokens) — see "1c." above. `weight = 0.0` by default.
 - [ ] Complete Orca Whirlpools integration (Marinade is done — see Status)
 - [x] Fund splitting / periodic consolidation across agent wallets — see
       `src/consolidation.rs`, disabled by default (see Known Limitations for

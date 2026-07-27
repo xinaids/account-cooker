@@ -49,6 +49,25 @@ name = "supersonic_cast"
 weight = 0.0
 params = { max_balance_fraction = 0.01, min_cast_lamports = 1000000, k = 8 }
 
+# Not enabled by default (weight = 0.0): casts a vote on an SPL Governance
+# (Realms) proposal — governance_program_id defaults to the shared spl-governance
+# instance (GovER5Lthms3bLBqWub97yVrMmEogzX7xNjdXpPPCVZw, verified live and
+# byte-identical on both mainnet-beta and devnet). `proposal_pubkey` has no
+# default — it names a specific, one-off proposal the operator must choose
+# explicitly, e.g. from a Realms UI URL (app.realms.today/dao/<realm>/proposal/<pubkey>).
+# Permissionlessly creates the wallet's own TokenOwnerRecord (always zero
+# governing-token balance — this protocol never deposits tokens) if one
+# doesn't already exist, so a cast vote carries mathematically zero voting
+# weight/influence by construction unless the operator has independently
+# deposited real governance tokens for this wallet outside this protocol —
+# see src/protocols/dao_vote.rs's module doc and THREAT_MODEL.md. Set
+# weight > 0 to opt in; only realms using the default (non-plugin) vote-weight
+# source are supported.
+[[protocols]]
+name = "dao_vote"
+weight = 0.0
+params = { proposal_pubkey = "REPLACE_WITH_A_REAL_PROPOSAL_PUBKEY", vote_choice = "abstain" }
+
 # Not enabled by default (enabled = false): periodically moves a small,
 # randomized fraction of one wallet's balance to another randomly-chosen
 # sibling wallet in this same fleet — the "periodically consolidates and

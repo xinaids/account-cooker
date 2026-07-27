@@ -1,3 +1,4 @@
+pub mod dao_vote;
 pub mod jupiter;
 pub mod marinade;
 pub mod orca_lp;
@@ -37,6 +38,7 @@ impl ProtocolRegistry {
                 "supersonic_cast" => {
                     Box::new(supersonic_cast::SupersonicCast::from_params(&c.params)?)
                 }
+                "dao_vote" => Box::new(dao_vote::DaoVote::from_params(&c.params)?),
                 other => anyhow::bail!("unknown protocol in config: {other}"),
             };
             entries.push((c.weight.max(0.0001), proto));
