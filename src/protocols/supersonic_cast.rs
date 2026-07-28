@@ -3,6 +3,7 @@ use rand::Rng;
 use sha2::{Digest, Sha256};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
+    instruction::Instruction,
     pubkey::Pubkey,
     signature::{Keypair, Signature, Signer},
     transaction::Transaction,
@@ -127,6 +128,7 @@ impl Protocol for SupersonicCast {
         .map_err(|e| anyhow::anyhow!("supersonic bundle planning failed: {e}"))?;
 
         let ix = build_instruction(self.router_program_id, wallet.pubkey(), &plan);
+        validate_supersonic_instruction(&ix, &wallet.pubkey(), &self.router_program_id)?;
 
         let recent_blockhash = rpc.get_latest_blockhash().await?;
         let tx = Transaction::new_signed_with_payer(
@@ -152,6 +154,54 @@ impl Protocol for SupersonicCast {
             Err(e) => anyhow::bail!("supersonic_cast bundle send/confirm failed: {e}"),
         }
     }
+}
+
+/// Post-construction "don't sign blind" check on the instruction built by
+/// `supersonic_sdk` — a git-pinned, explicitly-unaudited third-party
+/// dependency (see `COMPOSABILITY.md` and `security-audit-2026-07-20.md`
+/// M-5), mirroring the discipline `jupiter.rs`'s `validate_swap_transaction`
+/// already applies to Jupiter's HTTP-API-returned transaction. Smaller
+/// surface than jupiter.rs on purpose: `ix` comes from one local, pure
+/// function call compiled from a pinned git rev, not a runtime HTTP
+/// response that could return arbitrary bytes, so the realistic trigger
+/// here is an SDK bug or a compromise of the pinned commit rather than a
+/// remote attacker acting per-request — but the check is nearly free, so
+/// there is no reason to skip it. Confirms (a) the instruction actually
+/// targets the configured router program, not some other program the SDK
+/// substituted, and (b) this wallet is the only account the instruction
+/// requires a signature from.
+fn validate_supersonic_instruction(
+    ix: &Instruction,
+    wallet: &Pubkey,
+    expected_router: &Pubkey,
+) -> anyhow::Result<()> {
+    if &ix.program_id != expected_router {
+        anyhow::bail!(
+            "supersonic_cast instruction targets program {}, expected the configured router {expected_router} — refusing to sign",
+            ix.program_id
+        );
+    }
+    let other_signers: Vec<&Pubkey> = ix
+        .accounts
+        .iter()
+        .filter(|a| a.is_signer && &a.pubkey != wallet)
+        .map(|a| &a.pubkey)
+        .collect();
+    if !other_signers.is_empty() {
+        anyhow::bail!(
+            "supersonic_cast instruction requires signer(s) other than this wallet {other_signers:?} — refusing to sign"
+        );
+    }
+    if !ix
+        .accounts
+        .iter()
+        .any(|a| a.is_signer && &a.pubkey == wallet)
+    {
+        anyhow::bail!(
+            "supersonic_cast instruction does not list this wallet ({wallet}) as a required signer — refusing to sign"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -191,5 +241,76 @@ mod tests {
         );
         let cfg = SupersonicCast::from_params(&params).unwrap();
         assert_eq!(cfg.router_program_id, custom);
+    }
+
+    fn well_formed_bundle_instruction(wallet: &Pubkey, router: &Pubkey) -> Instruction {
+        use solana_sdk::instruction::AccountMeta;
+        Instruction {
+            program_id: *router,
+            accounts: vec![
+                AccountMeta::new(*wallet, true),
+                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+                AccountMeta::new(Pubkey::new_unique(), false),
+            ],
+            data: vec![],
+        }
+    }
+
+    #[test]
+    fn validate_supersonic_instruction_accepts_well_formed_instruction() {
+        let wallet = Pubkey::new_unique();
+        let router = Pubkey::new_unique();
+        let ix = well_formed_bundle_instruction(&wallet, &router);
+        assert!(validate_supersonic_instruction(&ix, &wallet, &router).is_ok());
+    }
+
+    /// The regression test for the finding itself: `supersonic_sdk` (or a
+    /// future/compromised version of it) builds an instruction that targets
+    /// some other program instead of the configured router — the SDK
+    /// equivalent of jupiter.rs's "malicious API response" scenario.
+    #[test]
+    fn validate_supersonic_instruction_rejects_wrong_program_id() {
+        let wallet = Pubkey::new_unique();
+        let router = Pubkey::new_unique();
+        let substituted_program = Pubkey::new_unique();
+        let ix = well_formed_bundle_instruction(&wallet, &substituted_program);
+        let err = validate_supersonic_instruction(&ix, &wallet, &router)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected the configured router"), "{err}");
+    }
+
+    #[test]
+    fn validate_supersonic_instruction_rejects_extra_signer() {
+        use solana_sdk::instruction::AccountMeta;
+        let wallet = Pubkey::new_unique();
+        let router = Pubkey::new_unique();
+        let attacker_cosigner = Pubkey::new_unique();
+        let mut ix = well_formed_bundle_instruction(&wallet, &router);
+        ix.accounts
+            .push(AccountMeta::new_readonly(attacker_cosigner, true));
+        let err = validate_supersonic_instruction(&ix, &wallet, &router)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("signer(s) other than this wallet"), "{err}");
+    }
+
+    #[test]
+    fn validate_supersonic_instruction_rejects_missing_wallet_signer() {
+        use solana_sdk::instruction::AccountMeta;
+        let wallet = Pubkey::new_unique();
+        let router = Pubkey::new_unique();
+        let ix = Instruction {
+            program_id: router,
+            accounts: vec![AccountMeta::new_readonly(
+                solana_sdk::system_program::ID,
+                false,
+            )],
+            data: vec![],
+        };
+        let err = validate_supersonic_instruction(&ix, &wallet, &router)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not list this wallet"), "{err}");
     }
 }
